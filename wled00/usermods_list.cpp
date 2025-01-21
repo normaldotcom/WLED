@@ -242,6 +242,11 @@
 #include "../usermods/LD2410_v2/usermod_ld2410.h"
 #endif
 
+#ifdef USERMOD_PROTOFUSION
+#include "../usermods/protofusion_v2/usermod_protofusion.h"
+#endif
+
+
 void registerUsermods()
 {
 /*
@@ -250,6 +255,10 @@ void registerUsermods()
    * \/ \/ \/
    */
   //UsermodManager::add(new MyExampleUsermod());
+
+  #ifdef USERMOD_PROTOFUSION
+  UsermodManager::add(new Usermod_Protofusion());
+  #endif
 
   #ifdef USERMOD_BATTERY
   UsermodManager::add(new UsermodBattery());
