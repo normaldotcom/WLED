@@ -2,13 +2,13 @@
 /*
  * Register your v2 usermods here!
  */
-#ifdef USERMOD_SN_PHOTORESISTOR
-#include "../usermods/SN_Photoresistor/usermod_sn_photoresistor.h"
+#ifdef USERMOD_PROTOFUSION
+#include "../usermods/protofusion_v2/usermod_protofusion.h"
 #endif
 
 void registerUsermods()
 {
-#ifdef USERMOD_SN_PHOTORESISTOR
-  UsermodManager::add(new Usermod_SN_Photoresistor());
+#ifdef USERMOD_PROTOFUSION
+  UsermodManager::add(new Usermod_Protofusion());
 #endif
 }

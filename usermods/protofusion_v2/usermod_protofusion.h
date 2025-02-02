@@ -1,6 +1,17 @@
 #pragma once
 
 #include "wled.h"
+#include <Arduino.h>
+
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+
+#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+  Adafruit_SSD1306 display(128, 32, &Wire, -1);
+
 
 #include <WiFiUdp.h>
 WiFiUDP myUdp;
@@ -9,99 +20,76 @@ IPAddress mySendIp(192, 168, 1, 22);
 unsigned int mySendPort = 5005;
 
 #include <MicroOscUdp.h>
-// The number 1024 between the < > below  is the maximum number of bytes reserved for incomming messages.
-// Outgoing messages are written directly to the output and do not need more reserved bytes.
+
+
+//1024 byte buffer for incoming messages. Maybe downsize this.
 MicroOscUdp<1024> myOsc(&myUdp, mySendIp, mySendPort);
 
 
-//Pin defaults for QuinLed Dig-Uno (A0)
-#ifndef PHOTORESISTOR_PIN
-#define PHOTORESISTOR_PIN A0 // this pin IO1
+#ifndef DISTANCE_SENSOR_PIN
+  #define DISTANCE_SENSOR_PIN 32 // this pin IO1
 #endif
 
-// the frequency to check photoresistor, 10 seconds
+// the default frequency to read the analog distance sensor (ms)
 #ifndef USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL
-#define USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL 10000
+  #define USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL 10000
 #endif
 
 // how many seconds after boot to take first measurement, 10 seconds
 #ifndef USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT
-#define USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT 10000
+  #define USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT 10000
 #endif
 
-// supplied voltage
-#ifndef USERMOD_PROTOFUSION_REFERENCE_VOLTAGE
-#define USERMOD_PROTOFUSION_REFERENCE_VOLTAGE 5
-#endif
-
-// 10 bits
-#ifndef USERMOD_PROTOFUSION_ADC_PRECISION
-#define USERMOD_PROTOFUSION_ADC_PRECISION 1024.0f
-#endif
-
-// resistor size 10K hms
-#ifndef USERMOD_PROTOFUSION_RESISTOR_VALUE
-#define USERMOD_PROTOFUSION_RESISTOR_VALUE 10000.0f
-#endif
-
-// only report if difference grater than offset value
-#ifndef USERMOD_PROTOFUSION_OFFSET_VALUE
-#define USERMOD_PROTOFUSION_OFFSET_VALUE 5
-#endif
 
 class Usermod_Protofusion : public Usermod
 {
 private:
+  // If we've connected to WIFI and set up OSC
   uint8_t isConnected = 0;
-  float referenceVoltage = USERMOD_PROTOFUSION_REFERENCE_VOLTAGE;
-  float resistorValue = USERMOD_PROTOFUSION_RESISTOR_VALUE;
-  float adcPrecision = USERMOD_PROTOFUSION_ADC_PRECISION;
-  int8_t offset = USERMOD_PROTOFUSION_OFFSET_VALUE;
 
   unsigned long readingInterval = USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL;
-  // set last reading as "40 sec before boot", so first reading is taken after 20 sec
   unsigned long lastMeasurement = UINT32_MAX - (USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL - USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT);
-  // flag to indicate we have finished the first getTemperature call
-  // allows this library to report to the user how long until the first
-  // measurement
-  bool getLuminanceComplete = false;
-  uint16_t lastLDRValue = -1000;
+
+  float lastReading = -1.0f;
 
   // flag set at startup
   bool disabled = false;
+  bool distCtlBrightness = true;
+  bool distCtlIntensity = true;
 
   // strings to reduce flash memory usage (used more than twice)
   static const char _name[];
   static const char _enabled[];
   static const char _readInterval[];
-  static const char _referenceVoltage[];
-  static const char _resistorValue[];
-  static const char _adcPrecision[];
-  static const char _offset[];
+  static const char _distance_controls_brightness[];
+  static const char _distance_controls_intensity[];
 
-  bool checkBoundSensor(float newValue, float prevValue, float maxDiff)
-  {
-    return isnan(prevValue) || newValue <= prevValue - maxDiff || newValue >= prevValue + maxDiff;
-  }
-
-  uint16_t getLuminance()
-  {
-    // http://forum.arduino.cc/index.php?topic=37555.0
-    // https://forum.arduino.cc/index.php?topic=185158.0
-    float volts = analogRead(PHOTORESISTOR_PIN) * (referenceVoltage / adcPrecision);
-    float amps = volts / resistorValue;
-    float lux = amps * 1000000 * 2.0;
-
-    lastMeasurement = millis();
-    getLuminanceComplete = true;
-    return uint16_t(lux);
-  }
 
 public:
   void setup()
   {
     // set pinmode
-    pinMode(PHOTORESISTOR_PIN, INPUT);
+    pinMode(DISTANCE_SENSOR_PIN, INPUT);
+
+    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+      //Serial.println(F("SSD1306 allocation failed"));
+      //for(;;); // Don't proceed, loop forever
+        DEBUG_PRINTF("[protofusion] LCD didn't init....");
+
+      // uh oh
+    }
+    else
+    {
+        display.clearDisplay();
+        display.display();
+        DEBUG_PRINTF("[protofusion] LCD should be doing stuff....");
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(10, 0);
+        display.println(F("Ethernet Connecting"));
+        display.display();
+
+    }
+
 
 
   }
@@ -118,11 +106,20 @@ public:
           // set up osc
           myUdp.begin(myReceivePort);
           isConnected = 1;
+
+          display.clearDisplay();
+          display.setTextColor(SSD1306_WHITE);
+          display.setCursor(10, 0);
+          display.println(F("Ethernet Connected"));
+          display.setTextSize(2); // Draw 2X-scale text
+          display.println(ETH.localIP().toString());
+          display.display();      // Show initial text
       }
       else{
         return;
       }
     }
+
     unsigned long now = millis();
 
     // check to see if we are due for taking a measurement
@@ -133,56 +130,27 @@ public:
       return;
     }
 
-    float val = analogRead(PHOTORESISTOR_PIN) / 4096.0;
-    myOsc.sendFloat("/distance", val);
-    strip.setBrightness(val*255, false); // update brightness;  immediately redraw
-
-
-    uint16_t currentLDRValue = getLuminance();
-    if (checkBoundSensor(currentLDRValue, lastLDRValue, offset))
+    lastReading = analogRead(DISTANCE_SENSOR_PIN) / 4096.0;
+    myOsc.sendFloat("/distance", lastReading);
+    if(distCtlBrightness)
     {
-      lastLDRValue = currentLDRValue;
-
-#ifndef WLED_DISABLE_MQTT
-      if (WLED_MQTT_CONNECTED)
-      {
-        char subuf[45];
-        strcpy(subuf, mqttDeviceTopic);
-        strcat_P(subuf, PSTR("/luminance"));
-        mqtt->publish(subuf, 0, true, String(lastLDRValue).c_str());
-      }
-      else
-      {
-        DEBUG_PRINTLN(F("Missing MQTT connection. Not publishing data"));
-      }
+      strip.setBrightness(lastReading*255, false); // update brightness;  immediately redraw
     }
-#endif
-  }
-
-  uint16_t getLastLDRValue()
-  {
-    return lastLDRValue;
+    if(distCtlIntensity)
+    {
+      strip.getSegment(0).intensity = lastReading*128;
+    }
   }
 
   void addToJsonInfo(JsonObject &root)
   {
-    JsonObject user = root[F("u")];
+    JsonObject user = root[F("protofusion")];
     if (user.isNull())
-      user = root.createNestedObject(F("u"));
+      user = root.createNestedObject(F("protofusion"));
 
-    JsonArray lux = user.createNestedArray(F("Luminance"));
+    JsonArray dist = user.createNestedArray(F("distance"));
 
-    if (!getLuminanceComplete)
-    {
-      // if we haven't read the sensor yet, let the user know
-      // that we are still waiting for the first measurement
-      lux.add((USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT - millis()) / 1000);
-      lux.add(F(" sec until read"));
-      return;
-    }
-
-    lux.add(lastLDRValue);
-    lux.add(F(" lux"));
+    dist.add(lastReading);
   }
 
   uint16_t getId()
@@ -199,12 +167,10 @@ public:
     JsonObject top = root.createNestedObject(FPSTR(_name)); // usermodname
     top[FPSTR(_enabled)] = !disabled;
     top[FPSTR(_readInterval)] = readingInterval;
-    top[FPSTR(_referenceVoltage)] = referenceVoltage;
-    top[FPSTR(_resistorValue)] = resistorValue;
-    top[FPSTR(_adcPrecision)] = adcPrecision;
-    top[FPSTR(_offset)] = offset;
-
-    DEBUG_PRINTLN(F("Photoresistor config saved."));
+    top[FPSTR(_distance_controls_brightness)] = distCtlBrightness;
+    top[FPSTR(_distance_controls_intensity)] = distCtlIntensity;
+    
+    DEBUG_PRINTLN(F("Protofusion config saved."));
   }
 
   /**
@@ -222,10 +188,8 @@ public:
 
     disabled         = !(top[FPSTR(_enabled)] | !disabled);
     readingInterval  = (top[FPSTR(_readInterval)] | readingInterval/1000); // convert to ms
-    referenceVoltage = top[FPSTR(_referenceVoltage)] | referenceVoltage;
-    resistorValue    = top[FPSTR(_resistorValue)] | resistorValue;
-    adcPrecision     = top[FPSTR(_adcPrecision)] | adcPrecision;
-    offset           = top[FPSTR(_offset)] | offset;
+    distCtlBrightness = (top[FPSTR(_distance_controls_brightness)] | !_distance_controls_brightness);
+    distCtlIntensity = (top[FPSTR(_distance_controls_intensity)] | !_distance_controls_intensity);
     DEBUG_PRINT(FPSTR(_name));
     DEBUG_PRINTLN(F(" config (re)loaded."));
 
@@ -235,10 +199,8 @@ public:
 };
 
 // strings to reduce flash memory usage (used more than twice)
-const char Usermod_Protofusion::_name[] PROGMEM = "Protofusion";
+const char Usermod_Protofusion::_name[] PROGMEM = "protofusion";
 const char Usermod_Protofusion::_enabled[] PROGMEM = "enabled";
-const char Usermod_Protofusion::_readInterval[] PROGMEM = "read-interval-ms";
-const char Usermod_Protofusion::_referenceVoltage[] PROGMEM = "supplied-voltage";
-const char Usermod_Protofusion::_resistorValue[] PROGMEM = "resistor-value";
-const char Usermod_Protofusion::_adcPrecision[] PROGMEM = "adc-precision";
-const char Usermod_Protofusion::_offset[] PROGMEM = "offset";
+const char Usermod_Protofusion::_readInterval[] PROGMEM = "distance-interval-ms";
+const char Usermod_Protofusion::_distance_controls_brightness[] PROGMEM = "distance-sets-brightness";
+const char Usermod_Protofusion::_distance_controls_intensity[] PROGMEM = "distance-sets-intensity";
