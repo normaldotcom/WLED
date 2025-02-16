@@ -2,42 +2,45 @@
 
 #include "wled.h"
 #include <Arduino.h>
-
 #include <SPI.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <MicroOscUdp.h>
+#include <WiFiUdp.h>
 
 
 #define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
-  Adafruit_SSD1306 display(128, 32, &Wire, -1);
+
+Adafruit_SSD1306 display(128, 32, &Wire, -1);
+WiFiUDP osc_udp;
+
+unsigned int osc_rx_port = 8888;
+unsigned int osc_tx_port = 5005;
+
+// NOTE: Strapping pins are
+// - GPIO0 (internal PU)
+// - GPIO2 (internal PD)
+// - GPIO4 (internal PD)
+// - GPIO5 (internal PU)
+// - GPIO15 (internal PU)
 
 
-#include <WiFiUdp.h>
-WiFiUDP myUdp;
-unsigned int myReceivePort = 8888;
-IPAddress mySendIp(192, 168, 1, 22);
-unsigned int mySendPort = 5005;
+// Default pin for dist sensor. Int so -1 is invalid.
+int8_t distance_sensor_pin = 32;
+int8_t digital0_pin = 12;
+int8_t digital1_pin = 33;
+int8_t digital2_pin = 34;
 
-#include <MicroOscUdp.h>
-
-
-//1024 byte buffer for incoming messages. Maybe downsize this.
-MicroOscUdp<1024> myOsc(&myUdp, mySendIp, mySendPort);
-
-
-#ifndef DISTANCE_SENSOR_PIN
-  #define DISTANCE_SENSOR_PIN 32 // this pin IO1
-#endif
 
 // the default frequency to read the analog distance sensor (ms)
 #ifndef USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL
-  #define USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL 10000
+  #define USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL 1000
 #endif
 
 // how many seconds after boot to take first measurement, 10 seconds
 #ifndef USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT
-  #define USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT 10000
+  #define USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT 5000
 #endif
 
 
@@ -51,9 +54,10 @@ private:
   unsigned long lastMeasurement = UINT32_MAX - (USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL - USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT);
 
   float lastReading = -1.0f;
+  float avg_reading = 0.0f;
 
   // flag set at startup
-  bool disabled = false;
+  bool enabled = false;
   bool distCtlBrightness = true;
   bool distCtlIntensity = true;
 
@@ -63,13 +67,50 @@ private:
   static const char _readInterval[];
   static const char _distance_controls_brightness[];
   static const char _distance_controls_intensity[];
+  static const char _distance_sensor_pin[];
+  static const char _digital0_pin[];
+  static const char _digital1_pin[];
+  static const char _digital2_pin[];
+  static const char _osc_destination_ip1[];
+  static const char _osc_destination_ip2[];
+  static const char _osc_destination_ip3[];
+  static const char _osc_destination_ip4[];
 
+  uint8_t osc_dest_ip[4] = {192, 168, 1, 22};
+
+  uint16_t segment_stop = 0;//emz testing
+  MicroOscUdp<1024>* osc;
 
 public:
   void setup()
   {
-    // set pinmode
-    pinMode(DISTANCE_SENSOR_PIN, INPUT);
+    IPAddress tx_ip = IPAddress(osc_dest_ip[0], osc_dest_ip[1], osc_dest_ip[2], osc_dest_ip[3]);
+    osc = new MicroOscUdp<1024>(&osc_udp, tx_ip, osc_tx_port);
+
+    // Allocate pins
+    PinManager::allocatePin(distance_sensor_pin, false, PinOwner::UM_PROTOFUSION);
+    
+    if(digital0_pin != -1)
+    {
+      PinManager::allocatePin(digital0_pin, false, PinOwner::UM_PROTOFUSION);
+      pinMode(digital0_pin, INPUT_PULLUP);
+    }
+    if(digital1_pin != -1)
+    {
+        PinManager::allocatePin(digital1_pin, false, PinOwner::UM_PROTOFUSION);
+        pinMode(digital1_pin, INPUT_PULLUP);
+    }
+    if(digital2_pin != -1)
+    {
+      PinManager::allocatePin(digital2_pin, false, PinOwner::UM_PROTOFUSION);
+      pinMode(digital2_pin, INPUT_PULLUP);
+    }
+
+    if(distance_sensor_pin != -1)
+    {
+      // set pinmode
+      pinMode(distance_sensor_pin, INPUT);
+    }
 
     if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
       //Serial.println(F("SSD1306 allocation failed"));
@@ -88,6 +129,10 @@ public:
         display.println(F("Ethernet Connecting"));
         display.display();
 
+        uint8_t minSegmentId = strip.getMainSegmentId();
+        Segment &seg = strip.getSegment(minSegmentId);
+
+        segment_stop= seg.stop;
     }
 
 
@@ -96,7 +141,7 @@ public:
 
   void loop()
   {
-    if (disabled || strip.isUpdating())
+    if (!enabled || strip.isUpdating())
       return;
 
     if(isConnected == 0)
@@ -104,14 +149,14 @@ public:
       if(WLED_CONNECTED)
       {
           // set up osc
-          myUdp.begin(myReceivePort);
+          osc_udp.begin(osc_rx_port);
           isConnected = 1;
 
           display.clearDisplay();
           display.setTextColor(SSD1306_WHITE);
           display.setCursor(10, 0);
           display.println(F("Ethernet Connected"));
-          display.setTextSize(2); // Draw 2X-scale text
+          display.setTextSize(1); // Draw 2X-scale text
           display.println(ETH.localIP().toString());
           display.display();      // Show initial text
       }
@@ -122,24 +167,53 @@ public:
 
     unsigned long now = millis();
 
-    // check to see if we are due for taking a measurement
-    // lastMeasurement will not be updated until the conversion
-    // is complete the the reading is finished
-    if (now - lastMeasurement < readingInterval)
-    {
-      return;
+ 
+    if (now - lastMeasurement > readingInterval)
+    {    
+
+      lastMeasurement = now;
+      if(distance_sensor_pin != -1)
+      {
+        lastReading = analogRead(distance_sensor_pin) / 4096.0;
+        avg_reading = avg_reading * 0.6f + lastReading * 0.4f;
+        osc->sendFloat("/distance", lastReading);
+      }
+      if(digital0_pin != -1)
+        osc->sendInt("/digital0", digitalRead(digital0_pin));
+      if(digital1_pin != -1)
+        osc->sendInt("/digital1", digitalRead(digital1_pin));
+      if(digital2_pin != -1)
+        osc->sendInt("/digital2", digitalRead(digital2_pin));
+
+
+      if(distCtlBrightness)
+      {
+        strip.setBrightness(avg_reading*255, false); // update brightness;  immediately redraw
+      }
+      if(distCtlIntensity)
+      {
+        strip.getSegment(0).intensity = (avg_reading-0.12)*128.0f*1.12f;
+
+        /// Sketchy testing /////////////////////////////////
+        uint8_t minSegmentId = strip.getMainSegmentId();
+        Segment &seg = strip.getSegment(minSegmentId);
+        if (seg.isActive()) 
+        {
+              //seg.setOption(SEG_OPTION_ON, true);
+              //seg.stop = lastReading * segment_stop; // emz can we do this??
+        }
+      }
+      
     }
 
-    lastReading = analogRead(DISTANCE_SENSOR_PIN) / 4096.0;
-    myOsc.sendFloat("/distance", lastReading);
-    if(distCtlBrightness)
-    {
-      strip.setBrightness(lastReading*255, false); // update brightness;  immediately redraw
-    }
-    if(distCtlIntensity)
-    {
-      strip.getSegment(0).intensity = lastReading*128;
-    }
+
+
+
+
+
+
+
+
   }
 
   void addToJsonInfo(JsonObject &root)
@@ -165,11 +239,18 @@ public:
   {
     // we add JSON object.
     JsonObject top = root.createNestedObject(FPSTR(_name)); // usermodname
-    top[FPSTR(_enabled)] = !disabled;
+    top[FPSTR(_enabled)] = enabled;
     top[FPSTR(_readInterval)] = readingInterval;
     top[FPSTR(_distance_controls_brightness)] = distCtlBrightness;
     top[FPSTR(_distance_controls_intensity)] = distCtlIntensity;
-    
+    top[FPSTR(_distance_sensor_pin)] = distance_sensor_pin;
+    top[FPSTR(_digital0_pin)] = digital0_pin;
+    top[FPSTR(_digital1_pin)] = digital1_pin;
+    top[FPSTR(_digital2_pin)] = digital2_pin;
+    top[FPSTR(_osc_destination_ip1)] = osc_dest_ip[0];
+    top[FPSTR(_osc_destination_ip2)] = osc_dest_ip[1];
+    top[FPSTR(_osc_destination_ip3)] = osc_dest_ip[2];
+    top[FPSTR(_osc_destination_ip4)] = osc_dest_ip[3];
     DEBUG_PRINTLN(F("Protofusion config saved."));
   }
 
@@ -178,29 +259,78 @@ public:
   */
   bool readFromConfig(JsonObject &root)
   {
-    // we look for JSON object.
-    JsonObject top = root[FPSTR(_name)];
-    if (top.isNull()) {
-      DEBUG_PRINT(FPSTR(_name));
-      DEBUG_PRINTLN(F(": No config found. (Using defaults.)"));
-      return false;
-    }
+    // // we look for JSON object.
+    // JsonObject top = root[FPSTR(_name)];
+    // if (top.isNull()) {
+    //   DEBUG_PRINT(FPSTR(_name));
+    //   DEBUG_PRINTLN(F(": No config found. (Using defaults.)"));
+    //   return false;
+    // }
 
-    disabled         = !(top[FPSTR(_enabled)] | !disabled);
-    readingInterval  = (top[FPSTR(_readInterval)] | readingInterval/1000); // convert to ms
-    distCtlBrightness = (top[FPSTR(_distance_controls_brightness)] | !_distance_controls_brightness);
-    distCtlIntensity = (top[FPSTR(_distance_controls_intensity)] | !_distance_controls_intensity);
-    DEBUG_PRINT(FPSTR(_name));
-    DEBUG_PRINTLN(F(" config (re)loaded."));
+    // disabled         = !(top[FPSTR(_enabled)] | !disabled);
+    // readingInterval  = (top[FPSTR(_readInterval)] | readingInterval/1000); // convert to ms
+    // distCtlBrightness = (top[FPSTR(_distance_controls_brightness)] | !distCtlBrightness);
+    // distCtlIntensity = (top[FPSTR(_distance_controls_intensity)] | !distCtlIntensity);
+    // distance_sensor_pin = (top[FPSTR(_distance_sensor_pin)] | !distance_sensor_pin);
+    // digital0_pin = (top[FPSTR(_digital0_pin)] | !digital0_pin);
+    // digital1_pin = (top[FPSTR(_digital1_pin)] | !digital1_pin);
+    // digital2_pin = (top[FPSTR(_digital2_pin)] | !digital2_pin);
+    // osc_dest_ip[0] = (top[FPSTR(_osc_destination_ip1)] | osc_dest_ip[0]);
+    // osc_dest_ip[1] = (top[FPSTR(_osc_destination_ip2)] | osc_dest_ip[1]);
+    // osc_dest_ip[2] = (top[FPSTR(_osc_destination_ip3)] | osc_dest_ip[2]);
+    // osc_dest_ip[3] = (top[FPSTR(_osc_destination_ip4)] | osc_dest_ip[3]);
+    // DEBUG_PRINT(FPSTR(_name));
+    // DEBUG_PRINTLN(F(" config (re)loaded."));
+
+
+    JsonObject top = root[FPSTR(_name)];
+
+    bool configComplete = !top.isNull();
+
+    configComplete &= getJsonValue(top[FPSTR(_enabled)], enabled);
+    configComplete &= getJsonValue(top[FPSTR(_readInterval)], readingInterval);
+    configComplete &= getJsonValue(top[FPSTR(_distance_controls_brightness)], distCtlBrightness);
+    configComplete &= getJsonValue(top[FPSTR(_distance_controls_intensity)], distCtlIntensity);
+
+    configComplete &= getJsonValue(top[FPSTR(_distance_sensor_pin)], distance_sensor_pin);
+    configComplete &= getJsonValue(top[FPSTR(_digital0_pin)], digital0_pin);
+    configComplete &= getJsonValue(top[FPSTR(_digital1_pin)], digital1_pin);
+    configComplete &= getJsonValue(top[FPSTR(_digital2_pin)], digital2_pin);
+
+    configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip1)], osc_dest_ip[0]);
+    configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip2)], osc_dest_ip[1]);
+    configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip3)], osc_dest_ip[2]);
+    configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip4)], osc_dest_ip[3]);
+
+
+    // "pin" fields have special handling in settings page (or some_pin as well)
+    // configComplete &= getJsonValue(top["pin"][0], testPins[0], -1);
+    // configComplete &= getJsonValue(top["pin"][1], testPins[1], -1);
+
+    return configComplete;
+
+
+
+
+
+
 
     // use "return !top["newestParameter"].isNull();" when updating Usermod with new features
-    return true;
+    // return true;
   }
 };
 
 // strings to reduce flash memory usage (used more than twice)
-const char Usermod_Protofusion::_name[] PROGMEM = "protofusion";
+const char Usermod_Protofusion::_name[] PROGMEM = "protofusion_v8";
 const char Usermod_Protofusion::_enabled[] PROGMEM = "enabled";
 const char Usermod_Protofusion::_readInterval[] PROGMEM = "distance-interval-ms";
 const char Usermod_Protofusion::_distance_controls_brightness[] PROGMEM = "distance-sets-brightness";
 const char Usermod_Protofusion::_distance_controls_intensity[] PROGMEM = "distance-sets-intensity";
+const char Usermod_Protofusion::_distance_sensor_pin[] PROGMEM = "distance-sensor-pin";
+const char Usermod_Protofusion::_digital0_pin[] PROGMEM = "pin-digital-input-0_pin";
+const char Usermod_Protofusion::_digital1_pin[] PROGMEM = "pin-digital-input-1_pin";
+const char Usermod_Protofusion::_digital2_pin[] PROGMEM = "pin-digital-input-2_pin";
+const char Usermod_Protofusion::_osc_destination_ip1[] PROGMEM = "osc-destination-ip-1";
+const char Usermod_Protofusion::_osc_destination_ip2[] PROGMEM = "osc-destination-ip-2";
+const char Usermod_Protofusion::_osc_destination_ip3[] PROGMEM = "osc-destination-ip-3";
+const char Usermod_Protofusion::_osc_destination_ip4[] PROGMEM = "osc-destination-ip-4";
