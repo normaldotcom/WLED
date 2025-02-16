@@ -1,3 +1,18 @@
+//
+// protofusion usermod
+//
+//  - OSC server sends messages to specified endpoint
+//  - Analog input (optionally controls intensty and / or brightness)
+//  - Digital inputs 
+//
+// NOTE: Strapping pins are
+// - GPIO0 (internal PU)
+// - GPIO2 (internal PD)
+// - GPIO4 (internal PD)
+// - GPIO5 (internal PU)
+// - GPIO15 (internal PU)
+
+
 #pragma once
 
 #include "wled.h"
@@ -8,29 +23,6 @@
 #include <Adafruit_SSD1306.h>
 #include <MicroOscUdp.h>
 #include <WiFiUdp.h>
-
-
-#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
-
-Adafruit_SSD1306 display(128, 32, &Wire, -1);
-WiFiUDP osc_udp;
-
-unsigned int osc_rx_port = 8888;
-unsigned int osc_tx_port = 5005;
-
-// NOTE: Strapping pins are
-// - GPIO0 (internal PU)
-// - GPIO2 (internal PD)
-// - GPIO4 (internal PD)
-// - GPIO5 (internal PU)
-// - GPIO15 (internal PU)
-
-
-// Default pin for dist sensor. Int so -1 is invalid.
-int8_t distance_sensor_pin = 32;
-int8_t digital0_pin = 12;
-int8_t digital1_pin = 33;
-int8_t digital2_pin = 34;
 
 
 // the default frequency to read the analog distance sensor (ms)
@@ -76,14 +68,30 @@ private:
   static const char _osc_destination_ip3[];
   static const char _osc_destination_ip4[];
 
+  // Default destination IP, changeable from web interface 
   uint8_t osc_dest_ip[4] = {192, 168, 1, 22};
 
-  uint16_t segment_stop = 0;//emz testing
+  // Default pin for dist sensor. -1 is disabled.
+  int8_t distance_sensor_pin = 32;
+  int8_t digital0_pin = -1;
+  int8_t digital1_pin = -1;
+  int8_t digital2_pin = -1;
+
+  // Ports for OSC
+  unsigned int osc_rx_port = 8888;
+  unsigned int osc_tx_port = 5005;
+
+  Adafruit_SSD1306* display;
+  WiFiUDP osc_udp;
   MicroOscUdp<1024>* osc;
+
+  uint16_t segment_stop = 0; // emz testing
+
 
 public:
   void setup()
   {
+    display = new Adafruit_SSD1306(128, 32, &Wire, -1);
     IPAddress tx_ip = IPAddress(osc_dest_ip[0], osc_dest_ip[1], osc_dest_ip[2], osc_dest_ip[3]);
     osc = new MicroOscUdp<1024>(&osc_udp, tx_ip, osc_tx_port);
 
@@ -112,30 +120,25 @@ public:
       pinMode(distance_sensor_pin, INPUT);
     }
 
-    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-      //Serial.println(F("SSD1306 allocation failed"));
-      //for(;;); // Don't proceed, loop forever
-        DEBUG_PRINTF("[protofusion] LCD didn't init....");
-
-      // uh oh
+    if(!display->begin(SSD1306_SWITCHCAPVCC, 0x3C)) // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+    { 
+        DEBUG_PRINTF("protofusion: LCD didn't init....");
+        // uh oh
     }
     else
     {
-        display.clearDisplay();
-        display.display();
-        DEBUG_PRINTF("[protofusion] LCD should be doing stuff....");
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(10, 0);
-        display.println(F("Ethernet Connecting"));
-        display.display();
+        display->clearDisplay();
+        display->display();
+        display->setTextColor(SSD1306_WHITE);
+        display->setCursor(10, 0);
+        display->println(F("Ethernet Connecting"));
+        display->display();
 
         uint8_t minSegmentId = strip.getMainSegmentId();
         Segment &seg = strip.getSegment(minSegmentId);
 
         segment_stop= seg.stop;
     }
-
-
 
   }
 
@@ -152,13 +155,13 @@ public:
           osc_udp.begin(osc_rx_port);
           isConnected = 1;
 
-          display.clearDisplay();
-          display.setTextColor(SSD1306_WHITE);
-          display.setCursor(10, 0);
-          display.println(F("Ethernet Connected"));
-          display.setTextSize(1); // Draw 2X-scale text
-          display.println(ETH.localIP().toString());
-          display.display();      // Show initial text
+          display->clearDisplay();
+          display->setTextColor(SSD1306_WHITE);
+          display->setCursor(10, 0);
+          display->println(F("Ethernet Connected"));
+          display->setTextSize(1); // Draw 2X-scale text
+          display->println(ETH.localIP().toString());
+          display->display();      // Show initial text
       }
       else{
         return;
@@ -166,12 +169,11 @@ public:
     }
 
     unsigned long now = millis();
-
  
     if (now - lastMeasurement > readingInterval)
     {    
-
       lastMeasurement = now;
+
       if(distance_sensor_pin != -1)
       {
         lastReading = analogRead(distance_sensor_pin) / 4096.0;
@@ -203,17 +205,8 @@ public:
               //seg.stop = lastReading * segment_stop; // emz can we do this??
         }
       }
-      
+
     }
-
-
-
-
-
-
-
-
-
   }
 
   void addToJsonInfo(JsonObject &root)
@@ -259,30 +252,6 @@ public:
   */
   bool readFromConfig(JsonObject &root)
   {
-    // // we look for JSON object.
-    // JsonObject top = root[FPSTR(_name)];
-    // if (top.isNull()) {
-    //   DEBUG_PRINT(FPSTR(_name));
-    //   DEBUG_PRINTLN(F(": No config found. (Using defaults.)"));
-    //   return false;
-    // }
-
-    // disabled         = !(top[FPSTR(_enabled)] | !disabled);
-    // readingInterval  = (top[FPSTR(_readInterval)] | readingInterval/1000); // convert to ms
-    // distCtlBrightness = (top[FPSTR(_distance_controls_brightness)] | !distCtlBrightness);
-    // distCtlIntensity = (top[FPSTR(_distance_controls_intensity)] | !distCtlIntensity);
-    // distance_sensor_pin = (top[FPSTR(_distance_sensor_pin)] | !distance_sensor_pin);
-    // digital0_pin = (top[FPSTR(_digital0_pin)] | !digital0_pin);
-    // digital1_pin = (top[FPSTR(_digital1_pin)] | !digital1_pin);
-    // digital2_pin = (top[FPSTR(_digital2_pin)] | !digital2_pin);
-    // osc_dest_ip[0] = (top[FPSTR(_osc_destination_ip1)] | osc_dest_ip[0]);
-    // osc_dest_ip[1] = (top[FPSTR(_osc_destination_ip2)] | osc_dest_ip[1]);
-    // osc_dest_ip[2] = (top[FPSTR(_osc_destination_ip3)] | osc_dest_ip[2]);
-    // osc_dest_ip[3] = (top[FPSTR(_osc_destination_ip4)] | osc_dest_ip[3]);
-    // DEBUG_PRINT(FPSTR(_name));
-    // DEBUG_PRINTLN(F(" config (re)loaded."));
-
-
     JsonObject top = root[FPSTR(_name)];
 
     bool configComplete = !top.isNull();
@@ -308,12 +277,6 @@ public:
     // configComplete &= getJsonValue(top["pin"][1], testPins[1], -1);
 
     return configComplete;
-
-
-
-
-
-
 
     // use "return !top["newestParameter"].isNull();" when updating Usermod with new features
     // return true;
