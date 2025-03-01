@@ -490,15 +490,28 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
           }
         }
 
-        unsigned int stopled = ledsTotal * (avg_reading / 0.8f);
+        uint16_t seg_start = strip.getSegment(0).start;
+        uint16_t seg_stop = strip.getSegment(0).stop;
+        uint16_t seg_len = seg_stop - seg_start;
+        unsigned int stopled = (seg_len * (avg_reading / 0.8f) + seg_start);
 
         if (useMainSegmentOnly) strip.getMainSegment().beginDraw();
         if (!is4Chan) {
           for (unsigned i = previousLeds; i < ledsTotal; i++) {
-            if(i < stopled)
-              setRealtimePixel(i, e131_data[dmxOffset], e131_data[dmxOffset+1], e131_data[dmxOffset+2], 0);
-            else
+
+            
+            // EMZ need to change this to use segment length not the overall strip length
+            // If multiple segments, limit as a proportion of each segment
+            // If we're past the stop pont and we're in the segment we expect
+            if(i >= stopled && i > seg_start && i <= seg_stop)
+            {
               setRealtimePixel(i, 0,0,0, 0);
+            }
+            else
+            {
+              setRealtimePixel(i, e131_data[dmxOffset], e131_data[dmxOffset+1], e131_data[dmxOffset+2], 0);
+            }
+            
             dmxOffset+=3;
           }
         } else {
