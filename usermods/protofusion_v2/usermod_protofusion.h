@@ -31,9 +31,13 @@
 #define MAX_4_CH_LEDS_PER_UNIVERSE 128
 #define MAX_CHANNELS_PER_UNIVERSE 512
 
-
-static float lastReading = -1.0f;
-static float avg_reading = 0.0f;
+// Gross. Move these into a struct.
+static float mod1_lastReading = -1.0f;
+static float mod1_avg_reading = 0.0f;
+static float mod2_lastReading = -1.0f;
+static float mod2_avg_reading = 0.0f;
+static uint32_t mod1_segment_id_global = 0;
+static uint32_t mod2_segment_id_global = 0;
 
 
 void handleArtnetPollReplyEMZ(IPAddress ipAddress);
@@ -45,7 +49,7 @@ ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
 
 // the default frequency to read the analog distance sensor (ms)
 #ifndef USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL
-  #define USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL 1000
+  #define USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL 100
 #endif
 
 // how many seconds after boot to take first measurement, 10 seconds
@@ -66,16 +70,11 @@ private:
 
   // flag set at startup
   bool enabled = false;
-  bool distCtlBrightness = true;
-  bool distCtlIntensity = true;
 
   // strings to reduce flash memory usage (used more than twice)
   static const char _name[];
   static const char _enabled[];
   static const char _readInterval[];
-  static const char _distance_controls_brightness[];
-  static const char _distance_controls_intensity[];
-  static const char _distance_sensor_pin[];
   static const char _digital0_pin[];
   static const char _digital1_pin[];
   static const char _digital2_pin[];
@@ -84,11 +83,43 @@ private:
   static const char _osc_destination_ip3[];
   static const char _osc_destination_ip4[];
 
+  static const char _mod1_analog_input[];
+  static const char _mod1_min_value[];
+  static const char _mod1_max_value[];
+  static const char _mod1_segment_id[];
+  static const char _mod1_set_brightness[];
+  static const char _mod1_set_intensity[];
+  static const char _mod1_modulate_artnet[];
+
+  static const char _mod2_analog_input[];
+  static const char _mod2_min_value[];
+  static const char _mod2_max_value[];
+  static const char _mod2_segment_id[];
+  static const char _mod2_set_brightness[];
+  static const char _mod2_set_intensity[];
+  static const char _mod2_modulate_artnet[];
+
+
+  int8_t mod1_analog_input = -1;
+  float mod1_min_value = 0.0f;
+  float mod1_max_value = 1.0f;
+  uint8_t mod1_segment_id = 0;
+  bool mod1_set_brightness = false;
+  bool mod1_set_intensity = false;
+  bool mod1_modulate_artnet = false;
+
+  int8_t mod2_analog_input = -1;
+  float mod2_min_value = 0.0f;
+  float mod2_max_value = 1.0f;
+  uint8_t mod2_segment_id = 0;
+  bool mod2_set_brightness = false;
+  bool mod2_set_intensity = false;
+  bool mod2_modulate_artnet = false;
+
   // Default destination IP, changeable from web interface 
   uint8_t osc_dest_ip[4] = {192, 168, 1, 22};
 
   // Default pin for dist sensor. -1 is disabled.
-  int8_t distance_sensor_pin = 32;
   int8_t digital0_pin = -1;
   int8_t digital1_pin = -1;
   int8_t digital2_pin = -1;
@@ -101,8 +132,6 @@ private:
   WiFiUDP osc_udp;
   MicroOscUdp<1024>* osc;
 
-  uint16_t segment_stop = 0; // emz testing
-
 public:
   void setup()
   {
@@ -111,8 +140,19 @@ public:
     osc = new MicroOscUdp<1024>(&osc_udp, tx_ip, osc_tx_port);
 
     // Allocate pins
-    PinManager::allocatePin(distance_sensor_pin, false, PinOwner::UM_PROTOFUSION);
-    
+    if(mod1_analog_input != -1)
+    {
+      PinManager::allocatePin(mod1_analog_input, false, PinOwner::UM_PROTOFUSION);
+      pinMode(mod1_analog_input, INPUT);
+      DEBUG_PRINTF("protofusion: allocated mod1 analog input %d", mod1_analog_input);
+
+    }
+    if(mod2_analog_input != -1)
+    {
+      PinManager::allocatePin(mod2_analog_input, false, PinOwner::UM_PROTOFUSION);
+      pinMode(mod2_analog_input, INPUT);
+      DEBUG_PRINTF("protofusion: allocated mod2 analog input %d", mod2_analog_input);
+    }
     if(digital0_pin != -1)
     {
       PinManager::allocatePin(digital0_pin, false, PinOwner::UM_PROTOFUSION);
@@ -129,11 +169,6 @@ public:
       pinMode(digital2_pin, INPUT_PULLUP);
     }
 
-    if(distance_sensor_pin != -1)
-    {
-      // set pinmode
-      pinMode(distance_sensor_pin, INPUT);
-    }
 
     if(!display->begin(SSD1306_SWITCHCAPVCC, 0x3C)) // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
     { 
@@ -148,11 +183,6 @@ public:
         display->setCursor(10, 0);
         display->println(F("Ethernet Connecting"));
         display->display();
-
-        uint8_t minSegmentId = strip.getMainSegmentId();
-        Segment &seg = strip.getSegment(minSegmentId);
-
-        segment_stop= seg.stop;
     }
 
   }
@@ -197,12 +227,70 @@ public:
     {    
       lastMeasurement = now;
 
-      if(distance_sensor_pin != -1)
+      if(mod1_analog_input != -1)
       {
-        lastReading = analogRead(distance_sensor_pin) / 4096.0;
-        avg_reading = avg_reading * 0.6f + lastReading * 0.4f;
-        osc->sendFloat("/distance", lastReading);
+        // Convert ADC reading to 0-1
+        float raw = analogRead(mod1_analog_input) / 4096.0;
+
+        // Scale based on min/max specified by user
+        if(raw > mod1_max_value)
+           raw = mod1_max_value;
+        if(raw < mod1_min_value)
+          raw = mod1_min_value;
+        mod1_lastReading = (raw - mod1_min_value) / (mod1_max_value - mod1_min_value);
+
+        // Alpha filter of the readings
+        mod1_avg_reading = mod1_avg_reading * 0.6f + mod1_lastReading * 0.4f;
+
+        osc->sendFloat("/analog0", mod1_lastReading);
+
+        if(mod1_set_brightness)
+        {
+          // EMZ figure out how to do this per-segment...
+          strip.setBrightness(mod1_lastReading*255, false); // update brightness;  immediately redraw
+        }
+        if(mod1_set_intensity)
+        {
+          uint8_t intensity = (mod1_avg_reading)*128.0f;
+          strip.getSegment(mod1_segment_id).intensity = intensity;
+          // DEBUG_PRINTF("mod1 intensity: %d\r\n", intensity);
+
+        }
+        // DEBUG_PRINTF("mod1 active, pin %d reads %f converted to %f [max=%f min=%f]\r\n", mod1_analog_input, raw, mod1_lastReading, mod1_max_value, mod1_min_value);
+
       }
+      else
+      {
+        // DEBUG_PRINTLN("protofusion: mod1 not active\r\n");
+      }
+
+      if(mod2_analog_input != -1)
+      {
+        float raw = analogRead(mod2_analog_input) / 4096.0;
+
+        // Scale based on min/max specified by user
+        if(raw > mod2_max_value)
+           raw = mod2_max_value;
+        if(raw < mod2_min_value)
+          raw = mod2_min_value;
+        mod2_lastReading = (raw - mod2_min_value) / (mod2_max_value - mod2_min_value);
+
+        // Alpha filter of the readings
+        mod2_avg_reading = mod2_avg_reading * 0.6f + mod2_lastReading * 0.4f;
+
+        osc->sendFloat("/analog1", mod2_lastReading);
+
+        if(mod2_set_brightness)
+        {
+          // EMZ figure out how to do this per-segment...
+          strip.setBrightness(mod2_lastReading*255, false); // update brightness;  immediately redraw
+        }
+        if(mod2_set_intensity)
+        {
+          strip.getSegment(mod2_segment_id).intensity = (mod2_avg_reading-0.12)*128.0f*1.12f;
+        }
+      }
+
       if(digital0_pin != -1)
         osc->sendInt("/digital0", digitalRead(digital0_pin));
       if(digital1_pin != -1)
@@ -211,36 +299,22 @@ public:
         osc->sendInt("/digital2", digitalRead(digital2_pin));
 
 
-      if(distCtlBrightness)
-      {
-        strip.setBrightness(avg_reading*255, false); // update brightness;  immediately redraw
-      }
-      if(distCtlIntensity)
-      {
-        strip.getSegment(0).intensity = (avg_reading-0.12)*128.0f*1.12f;
-
-        /// Sketchy testing /////////////////////////////////
-        uint8_t minSegmentId = strip.getMainSegmentId();
-        Segment &seg = strip.getSegment(minSegmentId);
-        if (seg.isActive()) 
-        {
-              //seg.setOption(SEG_OPTION_ON, true);
-              //seg.stop = lastReading * segment_stop; // emz can we do this??
-        }
-      }
+      // Ugh. Expose stuff for the Artnet callback.
+      mod1_segment_id_global = mod1_segment_id;
+      mod2_segment_id_global = mod2_segment_id;
 
     }
   }
 
   void addToJsonInfo(JsonObject &root)
   {
-    JsonObject user = root[F("protofusion")];
-    if (user.isNull())
-      user = root.createNestedObject(F("protofusion"));
+    // JsonObject user = root[F("protofusion")];
+    // if (user.isNull())
+    //   user = root.createNestedObject(F("protofusion"));
 
-    JsonArray dist = user.createNestedArray(F("distance"));
+    // JsonArray dist = user.createNestedArray(F("distance"));
 
-    dist.add(lastReading);
+    // dist.add(lastReading);
   }
 
   uint16_t getId()
@@ -257,9 +331,6 @@ public:
     JsonObject top = root.createNestedObject(FPSTR(_name)); // usermodname
     top[FPSTR(_enabled)] = enabled;
     top[FPSTR(_readInterval)] = readingInterval;
-    top[FPSTR(_distance_controls_brightness)] = distCtlBrightness;
-    top[FPSTR(_distance_controls_intensity)] = distCtlIntensity;
-    top[FPSTR(_distance_sensor_pin)] = distance_sensor_pin;
     top[FPSTR(_digital0_pin)] = digital0_pin;
     top[FPSTR(_digital1_pin)] = digital1_pin;
     top[FPSTR(_digital2_pin)] = digital2_pin;
@@ -267,6 +338,24 @@ public:
     top[FPSTR(_osc_destination_ip2)] = osc_dest_ip[1];
     top[FPSTR(_osc_destination_ip3)] = osc_dest_ip[2];
     top[FPSTR(_osc_destination_ip4)] = osc_dest_ip[3];
+
+    top[FPSTR(_mod1_analog_input)] = mod1_analog_input;
+    top[FPSTR(_mod1_min_value)] = mod1_min_value; 
+    top[FPSTR(_mod1_max_value)] = mod1_max_value;
+    top[FPSTR(_mod1_segment_id)] = mod1_segment_id;
+    top[FPSTR(_mod1_set_brightness)] = mod1_set_brightness;
+    top[FPSTR(_mod1_set_intensity)] = mod1_set_intensity;
+    top[FPSTR(_mod1_modulate_artnet)] = mod1_modulate_artnet;
+
+    top[FPSTR(_mod2_analog_input)] = mod2_analog_input;
+    top[FPSTR(_mod2_min_value)] = mod2_min_value;
+    top[FPSTR(_mod2_max_value)] = mod2_max_value;
+    top[FPSTR(_mod2_segment_id)] = mod2_segment_id;
+    top[FPSTR(_mod2_set_brightness)] = mod2_set_brightness;
+    top[FPSTR(_mod2_set_intensity)] = mod2_set_intensity;
+    top[FPSTR(_mod2_modulate_artnet)] = mod2_modulate_artnet;
+
+
     DEBUG_PRINTLN(F("Protofusion config saved."));
   }
 
@@ -281,10 +370,7 @@ public:
 
     configComplete &= getJsonValue(top[FPSTR(_enabled)], enabled);
     configComplete &= getJsonValue(top[FPSTR(_readInterval)], readingInterval);
-    configComplete &= getJsonValue(top[FPSTR(_distance_controls_brightness)], distCtlBrightness);
-    configComplete &= getJsonValue(top[FPSTR(_distance_controls_intensity)], distCtlIntensity);
 
-    configComplete &= getJsonValue(top[FPSTR(_distance_sensor_pin)], distance_sensor_pin);
     configComplete &= getJsonValue(top[FPSTR(_digital0_pin)], digital0_pin);
     configComplete &= getJsonValue(top[FPSTR(_digital1_pin)], digital1_pin);
     configComplete &= getJsonValue(top[FPSTR(_digital2_pin)], digital2_pin);
@@ -293,6 +379,22 @@ public:
     configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip2)], osc_dest_ip[1]);
     configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip3)], osc_dest_ip[2]);
     configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip4)], osc_dest_ip[3]);
+
+    configComplete &= getJsonValue(top[FPSTR(_mod1_analog_input)], mod1_analog_input);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_min_value)], mod1_min_value);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_max_value)], mod1_max_value);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_segment_id)], mod1_segment_id);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_set_brightness)], mod1_set_brightness);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_set_intensity)], mod1_set_intensity);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_modulate_artnet)], mod1_modulate_artnet);
+
+    configComplete &= getJsonValue(top[FPSTR(_mod2_analog_input)], mod2_analog_input);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_min_value)], mod2_min_value);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_max_value)], mod2_max_value);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_segment_id)], mod2_segment_id);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_set_brightness)], mod2_set_brightness);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_set_intensity)], mod2_set_intensity);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_modulate_artnet)], mod2_modulate_artnet);
 
 
     // "pin" fields have special handling in settings page (or some_pin as well)
@@ -319,12 +421,10 @@ public:
 };
 
 // strings to reduce flash memory usage (used more than twice)
-const char Usermod_Protofusion::_name[] PROGMEM = "protofusion_v8";
+const char Usermod_Protofusion::_name[] PROGMEM = "protofusion_v13";
 const char Usermod_Protofusion::_enabled[] PROGMEM = "enabled";
-const char Usermod_Protofusion::_readInterval[] PROGMEM = "distance-interval-ms";
-const char Usermod_Protofusion::_distance_controls_brightness[] PROGMEM = "distance-sets-brightness";
-const char Usermod_Protofusion::_distance_controls_intensity[] PROGMEM = "distance-sets-intensity";
-const char Usermod_Protofusion::_distance_sensor_pin[] PROGMEM = "distance-sensor-pin";
+const char Usermod_Protofusion::_readInterval[] PROGMEM = "sampling-interval-ms";
+
 const char Usermod_Protofusion::_digital0_pin[] PROGMEM = "pin-digital-input-0_pin";
 const char Usermod_Protofusion::_digital1_pin[] PROGMEM = "pin-digital-input-1_pin";
 const char Usermod_Protofusion::_digital2_pin[] PROGMEM = "pin-digital-input-2_pin";
@@ -333,9 +433,21 @@ const char Usermod_Protofusion::_osc_destination_ip2[] PROGMEM = "osc-destinatio
 const char Usermod_Protofusion::_osc_destination_ip3[] PROGMEM = "osc-destination-ip-3";
 const char Usermod_Protofusion::_osc_destination_ip4[] PROGMEM = "osc-destination-ip-4";
 
+const char Usermod_Protofusion::_mod1_analog_input[] PROGMEM = "mod1-analog-input-pin";
+const char Usermod_Protofusion::_mod1_min_value[] PROGMEM = "mod1-min-value-0--1";
+const char Usermod_Protofusion::_mod1_max_value[] PROGMEM = "mod1-max-value-0--1";
+const char Usermod_Protofusion::_mod1_segment_id[] PROGMEM = "mod1-output-segment-id";
+const char Usermod_Protofusion::_mod1_set_brightness[] PROGMEM = "mod1-set-brightness?";
+const char Usermod_Protofusion::_mod1_set_intensity[] PROGMEM = "mod1-set-intensity?";
+const char Usermod_Protofusion::_mod1_modulate_artnet[] PROGMEM = "mod1-modulate-artnet?";
 
-
-
+const char Usermod_Protofusion::_mod2_analog_input[] PROGMEM = "mod2-analog-input-pin";
+const char Usermod_Protofusion::_mod2_min_value[] PROGMEM = "mod2-min-value-0--1";
+const char Usermod_Protofusion::_mod2_max_value[] PROGMEM = "mod2-max-value-0--1";
+const char Usermod_Protofusion::_mod2_segment_id[] PROGMEM = "mod2-output-segment-id";
+const char Usermod_Protofusion::_mod2_set_brightness[] PROGMEM = "mod2-set-brightness?";
+const char Usermod_Protofusion::_mod2_set_intensity[] PROGMEM = "mod2-set-intensity?";
+const char Usermod_Protofusion::_mod2_modulate_artnet[] PROGMEM = "mod2-modulate-artnet?";
 
 
 
@@ -490,21 +602,20 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
           }
         }
 
-        uint16_t seg_start = strip.getSegment(0).start;
-        uint16_t seg_stop = strip.getSegment(0).stop;
+        // MOD1 to start
+        uint16_t seg_start = strip.getSegment(mod1_segment_id_global).start;
+        uint16_t seg_stop = strip.getSegment(mod1_segment_id_global).stop;
         uint16_t seg_len = seg_stop - seg_start;
-        unsigned int stopled = (seg_len * (avg_reading / 0.8f) + seg_start);
+        unsigned int stopled = (seg_len * mod1_avg_reading) + seg_start; // assuming avg_reading is 0-1 scaled
 
         if (useMainSegmentOnly) strip.getMainSegment().beginDraw();
         if (!is4Chan) {
-          for (unsigned i = previousLeds; i < ledsTotal; i++) {
-
-            
-            // EMZ need to change this to use segment length not the overall strip length
-            // If multiple segments, limit as a proportion of each segment
+          for (unsigned i = previousLeds; i < ledsTotal; i++) 
+          {
             // If we're past the stop pont and we're in the segment we expect
             if(i >= stopled && i > seg_start && i <= seg_stop)
             {
+              // blackout the pixel
               setRealtimePixel(i, 0,0,0, 0);
             }
             else
