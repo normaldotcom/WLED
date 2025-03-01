@@ -24,6 +24,9 @@
 #include <MicroOscUdp.h>
 #include <WiFiUdp.h>
 #include "src/dependencies/e131/ESPAsyncE131.h"
+#include <RemoteDebug.h>
+
+RemoteDebug Debug;
 
 #define PROTOFUSION_ARTNET_PORT 6454
 //from e131
@@ -53,13 +56,17 @@ typedef struct _analog_mod_global_s_
 } analog_mod_global_t;
 
 
+
 static analog_mod_global_t analog_mod_global[NUM_ANALOG_MODS];
 
 void handleArtnetPollReplyEMZ(IPAddress ipAddress);
 void sendArtnetPollReplyEMZ(ArtPollReply *reply, IPAddress ipAddress, uint16_t portAddress);
 void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol);
 
+
 ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
+//AsyncWebServer console_server(81);
+
 
 
 // the default frequency to read the analog distance sensor (ms)
@@ -197,6 +204,11 @@ public:
     {
       if(ETH.localIP()[0]) //WLED_CONNECTED)
       {
+          Debug.begin("DebugHOST"); // Initialize the WiFi server
+          Debug.setResetCmdEnabled(true); // Enable the reset command
+          Debug.showProfiler(true); // Profiler (Good to measure times, to optimize codes)
+          Debug.showColors(true); // Colors
+
           // set up osc
           osc_udp.begin(osc_rx_port);
           isConnected = 1;
@@ -216,6 +228,8 @@ public:
         else
           DEBUG_PRINTLN(F("Protofusion: e131 init failed."));
 
+
+
       }
       else{
         return;
@@ -227,6 +241,8 @@ public:
     if (now - lastMeasurement > readingInterval)
     {    
       lastMeasurement = now;
+      //      debugI("Test debug print %u\r\n", lastMeasurement);
+      Debug.handle();
 
       for(uint8_t i=0; i<NUM_ANALOG_MODS; i++)
       {
@@ -424,9 +440,6 @@ const char Usermod_Protofusion::_mod2_segment_id[] PROGMEM = "mod2-output-segmen
 const char Usermod_Protofusion::_mod2_set_brightness[] PROGMEM = "mod2-set-brightness?";
 const char Usermod_Protofusion::_mod2_set_intensity[] PROGMEM = "mod2-set-intensity?";
 const char Usermod_Protofusion::_mod2_modulate_artnet[] PROGMEM = "mod2-modulate-artnet?";
-
-
-
 
 
 

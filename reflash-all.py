@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from zeroconf import ServiceBrowser, Zeroconf, ServiceListener
 import socket
 import os
@@ -35,7 +36,7 @@ try:
     for device in devices:
         print(f"[blue]Updating: {device[0]} - {device[1]}")
         #os.system(f'curl -s -F "update=@./.pio/build/esp32dev_poefusion_ethernet/firmware.bin" {device[1]}/update')
-        result = os.popen(f'curl -s -F "update=@./.pio/build/esp32dev_poefusion_ethernet/firmware.bin" {device[1]}/update').read()
+        result = os.popen(f'curl -s -F "update=@./.pio/build/lumapxl/firmware.bin" {device[1]}/update').read()
         if 'Update successful!' in result:
             print('[green]   Update OK')
         else:
