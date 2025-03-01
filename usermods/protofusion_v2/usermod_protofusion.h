@@ -31,14 +31,29 @@
 #define MAX_4_CH_LEDS_PER_UNIVERSE 128
 #define MAX_CHANNELS_PER_UNIVERSE 512
 
-// Gross. Move these into a struct.
-static float mod1_lastReading = -1.0f;
-static float mod1_avg_reading = 0.0f;
-static float mod2_lastReading = -1.0f;
-static float mod2_avg_reading = 0.0f;
-static uint32_t mod1_segment_id_global = 0;
-static uint32_t mod2_segment_id_global = 0;
 
+#define NUM_ANALOG_MODS 2
+
+typedef struct _analog_mod_s_
+{
+  int8_t analog_input = -1;
+  float min_value = 0.0f;
+  float max_value = 1.0f;
+  uint8_t segment_id = 0;
+  bool set_brightness = false;
+  bool set_intensity = false;
+  bool modulate_artnet = false;
+} analog_mod_t;
+
+typedef struct _analog_mod_global_s_
+{
+  float lastReading = -1.0f;
+  float avg_reading = 0.0f;
+  uint32_t segment_id = 0;
+} analog_mod_global_t;
+
+
+static analog_mod_global_t analog_mod_global[NUM_ANALOG_MODS];
 
 void handleArtnetPollReplyEMZ(IPAddress ipAddress);
 void sendArtnetPollReplyEMZ(ArtPollReply *reply, IPAddress ipAddress, uint16_t portAddress);
@@ -100,21 +115,8 @@ private:
   static const char _mod2_modulate_artnet[];
 
 
-  int8_t mod1_analog_input = -1;
-  float mod1_min_value = 0.0f;
-  float mod1_max_value = 1.0f;
-  uint8_t mod1_segment_id = 0;
-  bool mod1_set_brightness = false;
-  bool mod1_set_intensity = false;
-  bool mod1_modulate_artnet = false;
+  analog_mod_t analog_mod[NUM_ANALOG_MODS]; // use default values, thanks c++!
 
-  int8_t mod2_analog_input = -1;
-  float mod2_min_value = 0.0f;
-  float mod2_max_value = 1.0f;
-  uint8_t mod2_segment_id = 0;
-  bool mod2_set_brightness = false;
-  bool mod2_set_intensity = false;
-  bool mod2_modulate_artnet = false;
 
   // Default destination IP, changeable from web interface 
   uint8_t osc_dest_ip[4] = {192, 168, 1, 22};
@@ -139,20 +141,19 @@ public:
     IPAddress tx_ip = IPAddress(osc_dest_ip[0], osc_dest_ip[1], osc_dest_ip[2], osc_dest_ip[3]);
     osc = new MicroOscUdp<1024>(&osc_udp, tx_ip, osc_tx_port);
 
-    // Allocate pins
-    if(mod1_analog_input != -1)
+    // Set up each analog mod
+    for(uint8_t i=0; i<NUM_ANALOG_MODS; i++)
     {
-      PinManager::allocatePin(mod1_analog_input, false, PinOwner::UM_PROTOFUSION);
-      pinMode(mod1_analog_input, INPUT);
-      DEBUG_PRINTF("protofusion: allocated mod1 analog input %d", mod1_analog_input);
+      // Allocate pins
+      if(analog_mod[i].analog_input != -1)
+      {
+        PinManager::allocatePin(analog_mod[i].analog_input, false, PinOwner::UM_PROTOFUSION);
+        pinMode(analog_mod[i].analog_input, INPUT);
+        DEBUG_PRINTF("protofusion: allocated mod%d analog input %d", i, analog_mod[i].analog_input);
 
+      }
     }
-    if(mod2_analog_input != -1)
-    {
-      PinManager::allocatePin(mod2_analog_input, false, PinOwner::UM_PROTOFUSION);
-      pinMode(mod2_analog_input, INPUT);
-      DEBUG_PRINTF("protofusion: allocated mod2 analog input %d", mod2_analog_input);
-    }
+    
     if(digital0_pin != -1)
     {
       PinManager::allocatePin(digital0_pin, false, PinOwner::UM_PROTOFUSION);
@@ -227,69 +228,49 @@ public:
     {    
       lastMeasurement = now;
 
-      if(mod1_analog_input != -1)
+      for(uint8_t i=0; i<NUM_ANALOG_MODS; i++)
       {
-        // Convert ADC reading to 0-1
-        float raw = analogRead(mod1_analog_input) / 4096.0;
-
-        // Scale based on min/max specified by user
-        if(raw > mod1_max_value)
-           raw = mod1_max_value;
-        if(raw < mod1_min_value)
-          raw = mod1_min_value;
-        mod1_lastReading = (raw - mod1_min_value) / (mod1_max_value - mod1_min_value);
-
-        // Alpha filter of the readings
-        mod1_avg_reading = mod1_avg_reading * 0.6f + mod1_lastReading * 0.4f;
-
-        osc->sendFloat("/analog0", mod1_lastReading);
-
-        if(mod1_set_brightness)
+        if(analog_mod[i].analog_input != -1)
         {
-          // EMZ figure out how to do this per-segment...
-          strip.setBrightness(mod1_lastReading*255, false); // update brightness;  immediately redraw
+          // Convert ADC reading to 0-1
+          float raw = analogRead(analog_mod[i].analog_input) / 4096.0;
+
+          // Scale based on min/max specified by user
+          if(raw > analog_mod[i].max_value)
+            raw = analog_mod[i].max_value;
+          if(raw < analog_mod[i].min_value)
+            raw = analog_mod[i].min_value;
+          analog_mod_global[i].lastReading = (raw - analog_mod[i].min_value) / (analog_mod[i].max_value - analog_mod[i].min_value);
+
+          // Alpha filter of the readings
+          analog_mod_global[i].avg_reading = analog_mod_global[i].avg_reading * 0.6f + analog_mod_global[i].lastReading * 0.4f;
+
+          osc->sendFloat("/analog0", analog_mod_global[i].lastReading);
+
+          if(analog_mod[i].set_brightness)
+          {
+            // EMZ figure out how to do this per-segment...
+            strip.setBrightness(analog_mod_global[i].lastReading*255, false); // update brightness;  immediately redraw
+          }
+          if(analog_mod[i].set_intensity)
+          {
+            uint8_t intensity = (analog_mod_global[i].avg_reading)*128.0f;
+            strip.getSegment(analog_mod[i].segment_id).intensity = intensity;
+            // DEBUG_PRINTF("mod1 intensity: %d\r\n", intensity);
+
+          }
+          // DEBUG_PRINTF("mod1 active, pin %d reads %f converted to %f [max=%f min=%f]\r\n", mod1_analog_input, raw, mod1_lastReading, mod1_max_value, mod1_min_value);
+
         }
-        if(mod1_set_intensity)
+        else
         {
-          uint8_t intensity = (mod1_avg_reading)*128.0f;
-          strip.getSegment(mod1_segment_id).intensity = intensity;
-          // DEBUG_PRINTF("mod1 intensity: %d\r\n", intensity);
-
+          // DEBUG_PRINTLN("protofusion: mod1 not active\r\n");
         }
-        // DEBUG_PRINTF("mod1 active, pin %d reads %f converted to %f [max=%f min=%f]\r\n", mod1_analog_input, raw, mod1_lastReading, mod1_max_value, mod1_min_value);
 
+        // Ugh. Expose stuff for the Artnet callback.
+        analog_mod_global[i].segment_id = analog_mod[i].segment_id;;
       }
-      else
-      {
-        // DEBUG_PRINTLN("protofusion: mod1 not active\r\n");
-      }
 
-      if(mod2_analog_input != -1)
-      {
-        float raw = analogRead(mod2_analog_input) / 4096.0;
-
-        // Scale based on min/max specified by user
-        if(raw > mod2_max_value)
-           raw = mod2_max_value;
-        if(raw < mod2_min_value)
-          raw = mod2_min_value;
-        mod2_lastReading = (raw - mod2_min_value) / (mod2_max_value - mod2_min_value);
-
-        // Alpha filter of the readings
-        mod2_avg_reading = mod2_avg_reading * 0.6f + mod2_lastReading * 0.4f;
-
-        osc->sendFloat("/analog1", mod2_lastReading);
-
-        if(mod2_set_brightness)
-        {
-          // EMZ figure out how to do this per-segment...
-          strip.setBrightness(mod2_lastReading*255, false); // update brightness;  immediately redraw
-        }
-        if(mod2_set_intensity)
-        {
-          strip.getSegment(mod2_segment_id).intensity = (mod2_avg_reading-0.12)*128.0f*1.12f;
-        }
-      }
 
       if(digital0_pin != -1)
         osc->sendInt("/digital0", digitalRead(digital0_pin));
@@ -297,11 +278,6 @@ public:
         osc->sendInt("/digital1", digitalRead(digital1_pin));
       if(digital2_pin != -1)
         osc->sendInt("/digital2", digitalRead(digital2_pin));
-
-
-      // Ugh. Expose stuff for the Artnet callback.
-      mod1_segment_id_global = mod1_segment_id;
-      mod2_segment_id_global = mod2_segment_id;
 
     }
   }
@@ -339,21 +315,21 @@ public:
     top[FPSTR(_osc_destination_ip3)] = osc_dest_ip[2];
     top[FPSTR(_osc_destination_ip4)] = osc_dest_ip[3];
 
-    top[FPSTR(_mod1_analog_input)] = mod1_analog_input;
-    top[FPSTR(_mod1_min_value)] = mod1_min_value; 
-    top[FPSTR(_mod1_max_value)] = mod1_max_value;
-    top[FPSTR(_mod1_segment_id)] = mod1_segment_id;
-    top[FPSTR(_mod1_set_brightness)] = mod1_set_brightness;
-    top[FPSTR(_mod1_set_intensity)] = mod1_set_intensity;
-    top[FPSTR(_mod1_modulate_artnet)] = mod1_modulate_artnet;
+    top[FPSTR(_mod1_analog_input)] = analog_mod[0].analog_input;
+    top[FPSTR(_mod1_min_value)] = analog_mod[0].min_value; 
+    top[FPSTR(_mod1_max_value)] = analog_mod[0].max_value;
+    top[FPSTR(_mod1_segment_id)] = analog_mod[0].segment_id;
+    top[FPSTR(_mod1_set_brightness)] = analog_mod[0].set_brightness;
+    top[FPSTR(_mod1_set_intensity)] = analog_mod[0].set_intensity;
+    top[FPSTR(_mod1_modulate_artnet)] = analog_mod[0].modulate_artnet;
 
-    top[FPSTR(_mod2_analog_input)] = mod2_analog_input;
-    top[FPSTR(_mod2_min_value)] = mod2_min_value;
-    top[FPSTR(_mod2_max_value)] = mod2_max_value;
-    top[FPSTR(_mod2_segment_id)] = mod2_segment_id;
-    top[FPSTR(_mod2_set_brightness)] = mod2_set_brightness;
-    top[FPSTR(_mod2_set_intensity)] = mod2_set_intensity;
-    top[FPSTR(_mod2_modulate_artnet)] = mod2_modulate_artnet;
+    top[FPSTR(_mod2_analog_input)] = analog_mod[1].analog_input;
+    top[FPSTR(_mod2_min_value)] = analog_mod[1].min_value;
+    top[FPSTR(_mod2_max_value)] = analog_mod[1].max_value;
+    top[FPSTR(_mod2_segment_id)] = analog_mod[1].segment_id;
+    top[FPSTR(_mod2_set_brightness)] = analog_mod[1].set_brightness;
+    top[FPSTR(_mod2_set_intensity)] = analog_mod[1].set_intensity;
+    top[FPSTR(_mod2_modulate_artnet)] = analog_mod[1].modulate_artnet;
 
 
     DEBUG_PRINTLN(F("Protofusion config saved."));
@@ -380,21 +356,21 @@ public:
     configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip3)], osc_dest_ip[2]);
     configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip4)], osc_dest_ip[3]);
 
-    configComplete &= getJsonValue(top[FPSTR(_mod1_analog_input)], mod1_analog_input);
-    configComplete &= getJsonValue(top[FPSTR(_mod1_min_value)], mod1_min_value);
-    configComplete &= getJsonValue(top[FPSTR(_mod1_max_value)], mod1_max_value);
-    configComplete &= getJsonValue(top[FPSTR(_mod1_segment_id)], mod1_segment_id);
-    configComplete &= getJsonValue(top[FPSTR(_mod1_set_brightness)], mod1_set_brightness);
-    configComplete &= getJsonValue(top[FPSTR(_mod1_set_intensity)], mod1_set_intensity);
-    configComplete &= getJsonValue(top[FPSTR(_mod1_modulate_artnet)], mod1_modulate_artnet);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_analog_input)], analog_mod[0].analog_input);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_min_value)], analog_mod[0].min_value);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_max_value)], analog_mod[0].max_value);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_segment_id)], analog_mod[0].segment_id);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_set_brightness)], analog_mod[0].set_brightness);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_set_intensity)], analog_mod[0].set_intensity);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_modulate_artnet)], analog_mod[0].modulate_artnet);
 
-    configComplete &= getJsonValue(top[FPSTR(_mod2_analog_input)], mod2_analog_input);
-    configComplete &= getJsonValue(top[FPSTR(_mod2_min_value)], mod2_min_value);
-    configComplete &= getJsonValue(top[FPSTR(_mod2_max_value)], mod2_max_value);
-    configComplete &= getJsonValue(top[FPSTR(_mod2_segment_id)], mod2_segment_id);
-    configComplete &= getJsonValue(top[FPSTR(_mod2_set_brightness)], mod2_set_brightness);
-    configComplete &= getJsonValue(top[FPSTR(_mod2_set_intensity)], mod2_set_intensity);
-    configComplete &= getJsonValue(top[FPSTR(_mod2_modulate_artnet)], mod2_modulate_artnet);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_analog_input)], analog_mod[1].analog_input);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_min_value)], analog_mod[1].min_value);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_max_value)], analog_mod[1].max_value);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_segment_id)], analog_mod[1].segment_id);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_set_brightness)], analog_mod[1].set_brightness);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_set_intensity)], analog_mod[1].set_intensity);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_modulate_artnet)], analog_mod[1].modulate_artnet);
 
 
     // "pin" fields have special handling in settings page (or some_pin as well)
@@ -603,10 +579,10 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
         }
 
         // MOD1 to start
-        uint16_t seg_start = strip.getSegment(mod1_segment_id_global).start;
-        uint16_t seg_stop = strip.getSegment(mod1_segment_id_global).stop;
+        uint16_t seg_start = strip.getSegment(analog_mod_global[0].segment_id).start;
+        uint16_t seg_stop = strip.getSegment(analog_mod_global[0].segment_id).stop;
         uint16_t seg_len = seg_stop - seg_start;
-        unsigned int stopled = (seg_len * mod1_avg_reading) + seg_start; // assuming avg_reading is 0-1 scaled
+        unsigned int stopled = (seg_len * analog_mod_global[0].avg_reading) + seg_start; // assuming avg_reading is 0-1 scaled
 
         if (useMainSegmentOnly) strip.getMainSegment().beginDraw();
         if (!is4Chan) {
