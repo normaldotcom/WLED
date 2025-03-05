@@ -26,7 +26,17 @@
 #include "src/dependencies/e131/ESPAsyncE131.h"
 #include <RemoteDebug.h>
 
-RemoteDebug Debug;
+
+// the default frequency to read the analog distance sensor (ms)
+#ifndef USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL
+  #define USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL 100
+#endif
+
+// how many seconds after boot to take first measurement, 10 seconds
+#ifndef USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT
+  #define USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT 5000
+#endif
+
 
 #define PROTOFUSION_ARTNET_PORT 6454
 //from e131
@@ -34,12 +44,12 @@ RemoteDebug Debug;
 #define MAX_4_CH_LEDS_PER_UNIVERSE 128
 #define MAX_CHANNELS_PER_UNIVERSE 512
 
-
 #define NUM_ANALOG_MODS 2
 
 typedef struct _analog_mod_s_
 {
   int8_t analog_input = -1;
+  bool osc_input = false;
   float min_value = 0.0f;
   float max_value = 1.0f;
   uint8_t segment_id = 0;
@@ -52,6 +62,10 @@ typedef struct _analog_mod_global_s_
 {
   float lastReading = -1.0f;
   float avg_reading = 0.0f;
+  float osc_value = 0.0f;
+  bool osc_artnet_enable = false;
+  bool analog_artnet_enable = false;
+
   uint32_t segment_id = 0;
 } analog_mod_global_t;
 
@@ -59,25 +73,20 @@ typedef struct _analog_mod_global_s_
 
 static analog_mod_global_t analog_mod_global[NUM_ANALOG_MODS];
 
+
+// Private Prototypes
 void handleArtnetPollReplyEMZ(IPAddress ipAddress);
 void sendArtnetPollReplyEMZ(ArtPollReply *reply, IPAddress ipAddress, uint16_t portAddress);
 void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol);
+static void osc_parser( MicroOscMessage& receivedOscMessage);
 
 
+// Private Variables
+RemoteDebug Debug;
 ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
-//AsyncWebServer console_server(81);
 
 
 
-// the default frequency to read the analog distance sensor (ms)
-#ifndef USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL
-  #define USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL 100
-#endif
-
-// how many seconds after boot to take first measurement, 10 seconds
-#ifndef USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT
-  #define USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT 5000
-#endif
 
 
 class Usermod_Protofusion : public Usermod
@@ -92,11 +101,13 @@ private:
 
   // flag set at startup
   bool enabled = false;
+  bool send_on_change = false;
 
   // strings to reduce flash memory usage (used more than twice)
   static const char _name[];
   static const char _enabled[];
   static const char _readInterval[];
+  static const char _send_on_change[];
   static const char _digital0_pin[];
   static const char _digital1_pin[];
   static const char _digital2_pin[];
@@ -106,6 +117,7 @@ private:
   static const char _osc_destination_ip4[];
 
   static const char _mod1_analog_input[];
+  static const char _mod1_osc_input[];
   static const char _mod1_min_value[];
   static const char _mod1_max_value[];
   static const char _mod1_segment_id[];
@@ -114,6 +126,7 @@ private:
   static const char _mod1_modulate_artnet[];
 
   static const char _mod2_analog_input[];
+  static const char _mod2_osc_input[];
   static const char _mod2_min_value[];
   static const char _mod2_max_value[];
   static const char _mod2_segment_id[];
@@ -140,6 +153,7 @@ private:
   Adafruit_SSD1306* display;
   WiFiUDP osc_udp;
   MicroOscUdp<1024>* osc;
+
 
 public:
   void setup()
@@ -195,6 +209,7 @@ public:
 
   }
 
+
   void loop()
   {
     if (!enabled || strip.isUpdating())
@@ -244,8 +259,33 @@ public:
       //      debugI("Test debug print %u\r\n", lastMeasurement);
       Debug.handle();
 
+      osc->onOscMessageReceived( osc_parser );
+
+      char osc_path[128] = {0};
+
+
       for(uint8_t i=0; i<NUM_ANALOG_MODS; i++)
       {
+        if(analog_mod[i].osc_input == true)
+        { 
+          // TODO: Need to figure out how to update artnet stuff
+
+
+          // Read in OSC message and set things
+          if(analog_mod[i].set_brightness)
+          {
+            // EMZ figure out how to do this per-segment...
+            strip.setBrightness(analog_mod_global[i].osc_value*255, false); // update brightness;  immediately redraw
+          }
+          if(analog_mod[i].set_intensity)
+          {
+            uint8_t intensity = (analog_mod_global[i].osc_value)*128.0f;
+            strip.getSegment(analog_mod[i].segment_id).intensity = intensity;
+            // DEBUG_PRINTF("mod1 intensity: %d\r\n", intensity);
+          }
+        }    
+
+
         if(analog_mod[i].analog_input != -1)
         {
           // Convert ADC reading to 0-1
@@ -261,7 +301,10 @@ public:
           // Alpha filter of the readings
           analog_mod_global[i].avg_reading = analog_mod_global[i].avg_reading * 0.6f + analog_mod_global[i].lastReading * 0.4f;
 
-          osc->sendFloat("/analog0", analog_mod_global[i].lastReading);
+          snprintf(osc_path, 128, "/%s/analog%u", cmDNS, i);
+
+          // TODO: only send if change and send_on_change
+          osc->sendFloat(osc_path, analog_mod_global[i].lastReading);
 
           if(analog_mod[i].set_brightness)
           {
@@ -284,16 +327,25 @@ public:
         }
 
         // Ugh. Expose stuff for the Artnet callback.
-        analog_mod_global[i].segment_id = analog_mod[i].segment_id;;
+        analog_mod_global[i].segment_id = analog_mod[i].segment_id;
+        analog_mod_global[i].osc_artnet_enable = analog_mod[i].osc_input;
+        analog_mod_global[i].analog_artnet_enable = analog_mod[i].analog_input != -1;
       }
 
 
+      // TODO: only send if change and send_on_change
       if(digital0_pin != -1)
+      {
         osc->sendInt("/digital0", digitalRead(digital0_pin));
+      }
       if(digital1_pin != -1)
+      {
         osc->sendInt("/digital1", digitalRead(digital1_pin));
+      }
       if(digital2_pin != -1)
+      {
         osc->sendInt("/digital2", digitalRead(digital2_pin));
+      }
 
     }
   }
@@ -323,6 +375,8 @@ public:
     JsonObject top = root.createNestedObject(FPSTR(_name)); // usermodname
     top[FPSTR(_enabled)] = enabled;
     top[FPSTR(_readInterval)] = readingInterval;
+    top[FPSTR(_send_on_change)] = send_on_change;
+    
     top[FPSTR(_digital0_pin)] = digital0_pin;
     top[FPSTR(_digital1_pin)] = digital1_pin;
     top[FPSTR(_digital2_pin)] = digital2_pin;
@@ -332,6 +386,7 @@ public:
     top[FPSTR(_osc_destination_ip4)] = osc_dest_ip[3];
 
     top[FPSTR(_mod1_analog_input)] = analog_mod[0].analog_input;
+    top[FPSTR(_mod1_osc_input)] = analog_mod[0].osc_input;
     top[FPSTR(_mod1_min_value)] = analog_mod[0].min_value; 
     top[FPSTR(_mod1_max_value)] = analog_mod[0].max_value;
     top[FPSTR(_mod1_segment_id)] = analog_mod[0].segment_id;
@@ -340,6 +395,7 @@ public:
     top[FPSTR(_mod1_modulate_artnet)] = analog_mod[0].modulate_artnet;
 
     top[FPSTR(_mod2_analog_input)] = analog_mod[1].analog_input;
+    top[FPSTR(_mod2_osc_input)] = analog_mod[1].osc_input;
     top[FPSTR(_mod2_min_value)] = analog_mod[1].min_value;
     top[FPSTR(_mod2_max_value)] = analog_mod[1].max_value;
     top[FPSTR(_mod2_segment_id)] = analog_mod[1].segment_id;
@@ -362,6 +418,7 @@ public:
 
     configComplete &= getJsonValue(top[FPSTR(_enabled)], enabled);
     configComplete &= getJsonValue(top[FPSTR(_readInterval)], readingInterval);
+    configComplete &= getJsonValue(top[FPSTR(_send_on_change)], send_on_change);
 
     configComplete &= getJsonValue(top[FPSTR(_digital0_pin)], digital0_pin);
     configComplete &= getJsonValue(top[FPSTR(_digital1_pin)], digital1_pin);
@@ -373,6 +430,7 @@ public:
     configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip4)], osc_dest_ip[3]);
 
     configComplete &= getJsonValue(top[FPSTR(_mod1_analog_input)], analog_mod[0].analog_input);
+    configComplete &= getJsonValue(top[FPSTR(_mod1_osc_input)], analog_mod[0].osc_input);
     configComplete &= getJsonValue(top[FPSTR(_mod1_min_value)], analog_mod[0].min_value);
     configComplete &= getJsonValue(top[FPSTR(_mod1_max_value)], analog_mod[0].max_value);
     configComplete &= getJsonValue(top[FPSTR(_mod1_segment_id)], analog_mod[0].segment_id);
@@ -381,6 +439,7 @@ public:
     configComplete &= getJsonValue(top[FPSTR(_mod1_modulate_artnet)], analog_mod[0].modulate_artnet);
 
     configComplete &= getJsonValue(top[FPSTR(_mod2_analog_input)], analog_mod[1].analog_input);
+    configComplete &= getJsonValue(top[FPSTR(_mod2_osc_input)], analog_mod[1].osc_input);
     configComplete &= getJsonValue(top[FPSTR(_mod2_min_value)], analog_mod[1].min_value);
     configComplete &= getJsonValue(top[FPSTR(_mod2_max_value)], analog_mod[1].max_value);
     configComplete &= getJsonValue(top[FPSTR(_mod2_segment_id)], analog_mod[1].segment_id);
@@ -413,9 +472,11 @@ public:
 };
 
 // strings to reduce flash memory usage (used more than twice)
-const char Usermod_Protofusion::_name[] PROGMEM = "protofusion_v13";
+const char Usermod_Protofusion::_name[] PROGMEM = "protofusion_v14";
 const char Usermod_Protofusion::_enabled[] PROGMEM = "enabled";
 const char Usermod_Protofusion::_readInterval[] PROGMEM = "sampling-interval-ms";
+
+const char Usermod_Protofusion::_send_on_change[] PROGMEM = "only-send-data-on-change";
 
 const char Usermod_Protofusion::_digital0_pin[] PROGMEM = "pin-digital-input-0_pin";
 const char Usermod_Protofusion::_digital1_pin[] PROGMEM = "pin-digital-input-1_pin";
@@ -426,6 +487,7 @@ const char Usermod_Protofusion::_osc_destination_ip3[] PROGMEM = "osc-destinatio
 const char Usermod_Protofusion::_osc_destination_ip4[] PROGMEM = "osc-destination-ip-4";
 
 const char Usermod_Protofusion::_mod1_analog_input[] PROGMEM = "mod1-analog-input-pin";
+const char Usermod_Protofusion::_mod1_osc_input[] PROGMEM = "mod1-osc-input-enable";
 const char Usermod_Protofusion::_mod1_min_value[] PROGMEM = "mod1-min-value-0--1";
 const char Usermod_Protofusion::_mod1_max_value[] PROGMEM = "mod1-max-value-0--1";
 const char Usermod_Protofusion::_mod1_segment_id[] PROGMEM = "mod1-output-segment-id";
@@ -434,6 +496,7 @@ const char Usermod_Protofusion::_mod1_set_intensity[] PROGMEM = "mod1-set-intens
 const char Usermod_Protofusion::_mod1_modulate_artnet[] PROGMEM = "mod1-modulate-artnet?";
 
 const char Usermod_Protofusion::_mod2_analog_input[] PROGMEM = "mod2-analog-input-pin";
+const char Usermod_Protofusion::_mod2_osc_input[] PROGMEM = "mod2-osc-input-enable";
 const char Usermod_Protofusion::_mod2_min_value[] PROGMEM = "mod2-min-value-0--1";
 const char Usermod_Protofusion::_mod2_max_value[] PROGMEM = "mod2-max-value-0--1";
 const char Usermod_Protofusion::_mod2_segment_id[] PROGMEM = "mod2-output-segment-id";
@@ -442,6 +505,19 @@ const char Usermod_Protofusion::_mod2_set_intensity[] PROGMEM = "mod2-set-intens
 const char Usermod_Protofusion::_mod2_modulate_artnet[] PROGMEM = "mod2-modulate-artnet?";
 
 
+
+
+static void osc_parser( MicroOscMessage& receivedOscMessage) {
+
+  if ( receivedOscMessage.checkOscAddressAndTypeTags("/mod1/value", "i") ) 
+  {
+    analog_mod_global[0].osc_value = receivedOscMessage.nextAsFloat();
+  }
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/mod2/value", "i") ) 
+  {
+    analog_mod_global[1].osc_value = receivedOscMessage.nextAsFloat();
+  }
+}
 
 
 
@@ -591,20 +667,59 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
           }
         }
 
-        // MOD1 to start
-        uint16_t seg_start = strip.getSegment(analog_mod_global[0].segment_id).start;
-        uint16_t seg_stop = strip.getSegment(analog_mod_global[0].segment_id).stop;
-        uint16_t seg_len = seg_stop - seg_start;
-        unsigned int stopled = (seg_len * analog_mod_global[0].avg_reading) + seg_start; // assuming avg_reading is 0-1 scaled
+        // MOD1 ////////////////////////////////////////////////////////////
+        uint16_t seg_start_1 =  strip.getSegment(analog_mod_global[0].segment_id).start;
+        uint16_t seg_stop_1 = strip.getSegment(analog_mod_global[0].segment_id).stop ;
+        uint16_t seg_len_1 = seg_stop_1 - seg_start_1;
+        float scalar_1 = 0.0f; 
+        bool mod1_enable = analog_mod_global[0].osc_artnet_enable | analog_mod_global[0].analog_artnet_enable;
+
+        if(analog_mod_global[0].osc_artnet_enable)
+        {
+          scalar_1 = analog_mod_global[0].osc_value;
+        }
+        else if(analog_mod_global[0].analog_artnet_enable)
+        {
+          scalar_1 = analog_mod_global[0].avg_reading;
+        }
+
+        unsigned int stopled_1 = (seg_len_1 * scalar_1) + strip.getSegment(analog_mod_global[0].segment_id).start; // assuming avg_reading is 0-1 scaled
+
+        // debugI("Mod1: enabled=%u start=%u stop=%u len=%u scalar=%f stopled=%u\r\n", mod1_enable, seg_start_1, seg_stop_1, seg_len_1, scalar_1, stopled_1);
+
+
+        // MOD2 ////////////////////////////////////////////////////////////
+        uint16_t seg_start_2 =  strip.getSegment(analog_mod_global[1].segment_id).start;
+        uint16_t seg_stop_2 = strip.getSegment(analog_mod_global[1].segment_id).stop ;
+        uint16_t seg_len_2 = seg_stop_2 - seg_start_2;
+        float scalar_2 = 0.0f; 
+        bool mod2_enable = analog_mod_global[1].osc_artnet_enable | analog_mod_global[1].analog_artnet_enable;
+
+        if(analog_mod_global[1].osc_artnet_enable)
+        {
+          scalar_2 = analog_mod_global[1].osc_value;
+        }
+        else if(analog_mod_global[1].analog_artnet_enable)
+        {
+          scalar_2 = analog_mod_global[1].avg_reading;
+        }
+
+        unsigned int stopled_2 = (seg_len_2 * scalar_2) + strip.getSegment(analog_mod_global[1].segment_id).start; // assuming avg_reading is 0-1 scaled
+
+
 
         if (useMainSegmentOnly) strip.getMainSegment().beginDraw();
         if (!is4Chan) {
           for (unsigned i = previousLeds; i < ledsTotal; i++) 
           {
             // If we're past the stop pont and we're in the segment we expect
-            if(i >= stopled && i > seg_start && i <= seg_stop)
+            if(mod1_enable && i >= stopled_1 && i >= seg_start_1 && i <= seg_stop_1)
             {
               // blackout the pixel
+              setRealtimePixel(i, 0,0,0, 0);
+            }
+            else if(mod2_enable && i>= stopled_2 && i > seg_start_2 && i <= seg_stop_2)
+            {
               setRealtimePixel(i, 0,0,0, 0);
             }
             else
@@ -616,7 +731,7 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
           }
         } else {
           for (unsigned i = previousLeds; i < ledsTotal; i++) {
-            if(i < stopled)
+            if(i < stopled_1)
               setRealtimePixel(i, e131_data[dmxOffset], e131_data[dmxOffset+1], e131_data[dmxOffset+2], e131_data[dmxOffset+3]);
             else
               setRealtimePixel(i, 0,0,0, 0);
