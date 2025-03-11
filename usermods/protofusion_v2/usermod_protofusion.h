@@ -25,7 +25,7 @@
 #include <WiFiUdp.h>
 #include "src/dependencies/e131/ESPAsyncE131.h"
 #include <RemoteDebug.h>
-
+#include <Adafruit_TCA8418.h>
 
 // the default frequency to read the analog distance sensor (ms)
 #ifndef USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL
@@ -61,6 +61,7 @@ typedef struct _analog_mod_s_
 typedef struct _analog_mod_global_s_
 {
   float lastReading = -1.0f;
+  float lastSentReading = -1.0f;
   float avg_reading = 0.0f;
   float osc_value = 0.0f;
   bool osc_artnet_enable = false;
@@ -73,6 +74,7 @@ typedef struct _analog_mod_global_s_
 
 static analog_mod_global_t analog_mod_global[NUM_ANALOG_MODS];
 
+static int8_t digital_out0_pin_global = -1;
 
 // Private Prototypes
 void handleArtnetPollReplyEMZ(IPAddress ipAddress);
@@ -85,7 +87,7 @@ static bool find_next_led(uint16_t* current_strip, int16_t* current_led_on_strip
 // Private Variables
 RemoteDebug Debug;
 ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
-
+Adafruit_TCA8418 tio;
 
 
 
@@ -102,7 +104,7 @@ private:
 
   // flag set at startup
   bool enabled = true;
-  bool send_on_change = false;
+  bool send_on_change = true;
 
   // strings to reduce flash memory usage (used more than twice)
   static const char _name[];
@@ -112,6 +114,9 @@ private:
   static const char _digital0_pin[];
   static const char _digital1_pin[];
   static const char _digital2_pin[];
+
+  static const char _digital_out0_pin[];
+
   static const char _osc_destination_ip1[];
   static const char _osc_destination_ip2[];
   static const char _osc_destination_ip3[];
@@ -138,17 +143,22 @@ private:
 
   analog_mod_t analog_mod[NUM_ANALOG_MODS]; // use default values, thanks c++!
 
+  bool gpio_expander_connected = false;
 
   // Default destination IP, changeable from web interface 
   uint8_t osc_dest_ip[4] = {192, 168, 1, 22};
 
   // Default pin for dist sensor. -1 is disabled.
   int8_t digital0_pin = -1;
+  int8_t digital0_pin_val = -1;
   int8_t digital1_pin = -1;
+  int8_t digital1_pin_val = -1;
   int8_t digital2_pin = -1;
+  int8_t digital2_pin_val = -1;
+  int8_t digital_out0_pin = -1;
 
   // Ports for OSC
-  unsigned int osc_rx_port = 8888;
+  unsigned int osc_rx_port = 5000;
   unsigned int osc_tx_port = 5005;
 
   Adafruit_SSD1306* display;
@@ -162,6 +172,44 @@ public:
     display = new Adafruit_SSD1306(128, 32, &Wire, -1);
     IPAddress tx_ip = IPAddress(osc_dest_ip[0], osc_dest_ip[1], osc_dest_ip[2], osc_dest_ip[3]);
     osc = new MicroOscUdp<1024>(&osc_udp, tx_ip, osc_tx_port);
+
+    // Attempt to talk to GPIO expander
+    // Wire.beginTransmission(0x34);
+    // if(Wire.endTransmission() == 0)
+    // {
+    //   gpio_expander_connected = true;
+    // }
+
+    if (! tio.begin(TCA8418_DEFAULT_ADDR, &Wire)) 
+    {
+      gpio_expander_connected = false;
+    }
+    else
+    {
+      gpio_expander_connected = true;
+
+      // Enable debounce
+      tio.enableDebounce();
+
+      // Init pins
+      for (uint8_t pin = 0; pin < 18; pin++)
+      {
+        tio.pinMode(pin, INPUT_PULLUP);
+
+        // Interrupts - TESTING
+        tio.pinIRQMode(pin, FALLING);
+      }
+
+      pinMode(13, INPUT_PULLUP); // EMZ TESTING
+
+      //  flush pending interrupts
+      tio.flush();
+      //  enable interrupt mode
+      tio.enableInterrupts();
+    }
+
+
+
 
     // Set up each analog mod
     for(uint8_t i=0; i<NUM_ANALOG_MODS; i++)
@@ -191,6 +239,12 @@ public:
       PinManager::allocatePin(digital2_pin, false, PinOwner::UM_PROTOFUSION);
       pinMode(digital2_pin, INPUT_PULLUP);
     }
+    if(digital_out0_pin != -1)
+    {
+      PinManager::allocatePin(digital_out0_pin, true, PinOwner::UM_PROTOFUSION);
+      pinMode(digital_out0_pin, OUTPUT);
+      digital_out0_pin_global = digital_out0_pin;
+    }
 
 
     if(!display->begin(SSD1306_SWITCHCAPVCC, 0x3C)) // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
@@ -213,6 +267,9 @@ public:
 
   void loop()
   {
+    
+    char osc_path[128] = {0};
+
     if (!enabled || strip.isUpdating())
       return;
 
@@ -231,11 +288,18 @@ public:
 
           display->clearDisplay();
           display->setTextColor(SSD1306_WHITE);
-          display->setCursor(10, 0);
+          display->setCursor(0, 0);
           display->println(F("LumaPXL: Ready     "));
           display->setTextSize(1); // Draw 2X-scale text
-          display->println("");
+          //display->println("");
+          display->print("  IP: ");
           display->println(ETH.localIP().toString());
+
+          if(gpio_expander_connected)
+            display->println("  Xpand: Online");
+          else
+            display->println("  Xpand: Offline");
+
           display->display();      // Show initial text
 
           
@@ -253,17 +317,107 @@ public:
       }
     }
 
+
+
+
+
+    //  Handle ISR
+    if (digitalRead(13) == 0)
+    {
+      //  CHECK WHICH INTERRUPTS TO HANDLE
+      int intStat = tio.readRegister(TCA8418_REG_INT_STAT);
+      if (intStat & 0x02)
+      {
+        //  reading the registers is mandatory to clear IRQ flag
+        //  can also be used to find the GPIO changed
+        //  as these registers are a bitmap of the gpio pins.
+        tio.readRegister(TCA8418_REG_GPIO_INT_STAT_1);
+        tio.readRegister(TCA8418_REG_GPIO_INT_STAT_2);
+        tio.readRegister(TCA8418_REG_GPIO_INT_STAT_3);
+        //  clear GPIO IRQ flag
+        tio.writeRegister(TCA8418_REG_INT_STAT, 2);
+      }
+
+      if (intStat & 0x01)
+      {
+        //  datasheet page 16 - Table 2
+        int keyCode = tio.getEvent();
+        uint8_t gpio = (keyCode & 0x7F) - 97;
+        if(keyCode & 0x80)
+        {
+          //  map keyCode to GPIO nr.
+          debugI("Xpand: Press on pin %u\r\n", gpio);
+          snprintf(osc_path, 128, "/%s/digital%u", cmDNS, gpio+10); // Offset of 10 from onboard GPIO
+          osc->sendInt(osc_path, 1);
+        }
+        else
+        {
+          //  map keyCode to GPIO nr.
+          debugI("Xpand: Release on pin %u\r\n", gpio);
+          snprintf(osc_path, 128, "/%s/digital%u", cmDNS, gpio+10); // Offset of 10 from onboard GPIO
+          osc->sendInt(osc_path, 0);
+        }
+
+        //  clear the EVENT IRQ flag
+        tio.writeRegister(TCA8418_REG_INT_STAT, 1);
+      }
+
+      //  check pending events
+      // int intstat = tio.readRegister(TCA8418_REG_INT_STAT);
+      // if ((intstat & 0x03) == 0) TCA8418_event = false;
+
+    }
+
+    // TODO: only send if change and send_on_change
+    if(digital0_pin != -1)
+    {
+      uint8_t val = digitalRead(digital0_pin);
+      if(digital0_pin_val != val)
+      {
+        snprintf(osc_path, 128, "/%s/digital0", cmDNS);
+        osc->sendInt(osc_path, val);
+      }
+      digital0_pin_val = val;
+    }
+    if(digital1_pin != -1)
+    {
+      uint8_t val = digitalRead(digital1_pin);
+      if(digital1_pin_val != val)
+      {
+        snprintf(osc_path, 128, "/%s/digital1", cmDNS);
+        osc->sendInt(osc_path, val);
+      }
+      digital1_pin_val = val;
+    }
+    if(digital2_pin != -1)
+    {
+      uint8_t val = digitalRead(digital2_pin);
+      if(digital2_pin_val != val)
+      {
+        snprintf(osc_path, 128, "/%s/digital2", cmDNS);
+        osc->sendInt(osc_path, val);
+      }
+      digital2_pin_val = val;
+    }
+    
+    
+
+
+
     unsigned long now = millis();
  
     if (now - lastMeasurement > readingInterval)
     {    
       lastMeasurement = now;
       //      debugI("Test debug print %u\r\n", lastMeasurement);
+
+      // debugI("GPIO Expander State: %u\r\n", gpio_expander_connected);
+
+
       Debug.handle();
 
       osc->onOscMessageReceived( osc_parser );
 
-      char osc_path[128] = {0};
 
 
       for(uint8_t i=0; i<NUM_ANALOG_MODS; i++)
@@ -288,7 +442,7 @@ public:
         }    
 
 
-        if(analog_mod[i].analog_input != -1)
+        else if(analog_mod[i].analog_input != -1)
         {
           // Convert ADC reading to 0-1
           float raw = analogRead(analog_mod[i].analog_input) / 4096.0;
@@ -299,14 +453,23 @@ public:
           if(raw < analog_mod[i].min_value)
             raw = analog_mod[i].min_value;
           analog_mod_global[i].lastReading = (raw - analog_mod[i].min_value) / (analog_mod[i].max_value - analog_mod[i].min_value);
+          
+          bool value_changed = false;
+          if(fabsf(analog_mod_global[i].lastReading - analog_mod_global[i].lastSentReading) > 0.01f)
+          {
+            value_changed = true;
+          }
 
           // Alpha filter of the readings
           analog_mod_global[i].avg_reading = analog_mod_global[i].avg_reading * 0.6f + analog_mod_global[i].lastReading * 0.4f;
 
-          snprintf(osc_path, 128, "/%s/analog%u", cmDNS, i);
-
-          // TODO: only send if change and send_on_change
-          osc->sendFloat(osc_path, analog_mod_global[i].lastReading);
+          // Only send value if changed or if not sending on change only
+          if(value_changed || send_on_change == false)
+          {
+            snprintf(osc_path, 128, "/%s/analog%u", cmDNS, i);
+            osc->sendFloat(osc_path, analog_mod_global[i].lastReading);
+            analog_mod_global[i].lastSentReading = analog_mod_global[i].lastReading;
+          }
 
           if(analog_mod[i].set_brightness)
           {
@@ -335,19 +498,7 @@ public:
       }
 
 
-      // TODO: only send if change and send_on_change
-      if(digital0_pin != -1)
-      {
-        osc->sendInt("/digital0", digitalRead(digital0_pin));
-      }
-      if(digital1_pin != -1)
-      {
-        osc->sendInt("/digital1", digitalRead(digital1_pin));
-      }
-      if(digital2_pin != -1)
-      {
-        osc->sendInt("/digital2", digitalRead(digital2_pin));
-      }
+      
 
     }
   }
@@ -394,6 +545,9 @@ public:
     top[FPSTR(_digital0_pin)] = digital0_pin;
     top[FPSTR(_digital1_pin)] = digital1_pin;
     top[FPSTR(_digital2_pin)] = digital2_pin;
+
+    top[FPSTR(_digital_out0_pin)] = digital_out0_pin;
+
     top[FPSTR(_osc_destination_ip1)] = osc_dest_ip[0];
     top[FPSTR(_osc_destination_ip2)] = osc_dest_ip[1];
     top[FPSTR(_osc_destination_ip3)] = osc_dest_ip[2];
@@ -437,6 +591,8 @@ public:
     configComplete &= getJsonValue(top[FPSTR(_digital0_pin)], digital0_pin);
     configComplete &= getJsonValue(top[FPSTR(_digital1_pin)], digital1_pin);
     configComplete &= getJsonValue(top[FPSTR(_digital2_pin)], digital2_pin);
+
+    configComplete &= getJsonValue(top[FPSTR(_digital_out0_pin)], digital_out0_pin);
 
     configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip1)], osc_dest_ip[0]);
     configComplete &= getJsonValue(top[FPSTR(_osc_destination_ip2)], osc_dest_ip[1]);
@@ -487,11 +643,13 @@ const char Usermod_Protofusion::_name[] PROGMEM = "protofusion_v14";
 const char Usermod_Protofusion::_enabled[] PROGMEM = "enabled";
 const char Usermod_Protofusion::_readInterval[] PROGMEM = "sampling-interval-ms";
 
-const char Usermod_Protofusion::_send_on_change[] PROGMEM = "only-send-data-on-change";
+const char Usermod_Protofusion::_send_on_change[] PROGMEM = "only-send-analog-on-change";
 
 const char Usermod_Protofusion::_digital0_pin[] PROGMEM = "pin-digital-input-0_pin";
 const char Usermod_Protofusion::_digital1_pin[] PROGMEM = "pin-digital-input-1_pin";
 const char Usermod_Protofusion::_digital2_pin[] PROGMEM = "pin-digital-input-2_pin";
+const char Usermod_Protofusion::_digital_out0_pin[] PROGMEM = "pin-digital-output-0_pin";
+
 const char Usermod_Protofusion::_osc_destination_ip1[] PROGMEM = "osc-destination-ip-1";
 const char Usermod_Protofusion::_osc_destination_ip2[] PROGMEM = "osc-destination-ip-2";
 const char Usermod_Protofusion::_osc_destination_ip3[] PROGMEM = "osc-destination-ip-3";
@@ -518,20 +676,56 @@ const char Usermod_Protofusion::_mod2_modulate_artnet[] PROGMEM = "mod2-modulate
 
 
 
-static void osc_parser( MicroOscMessage& receivedOscMessage) {
+static void osc_parser( MicroOscMessage& receivedOscMessage) 
+{
 
-  if ( receivedOscMessage.checkOscAddressAndTypeTags("/mod1/value", "i") ) 
+
+  if ( receivedOscMessage.checkOscAddressAndTypeTags("/mod1/value", "f") ) 
   {
+    debugI("Received OSC message for mod1 value\r\n");
     analog_mod_global[0].osc_value = receivedOscMessage.nextAsFloat();
   }
-  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/mod2/value", "i") ) 
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/mod2/value", "f") ) 
   {
     analog_mod_global[1].osc_value = receivedOscMessage.nextAsFloat();
   }
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/digital0/value", "i") ) 
+  {
+    digitalWrite(digital_out0_pin_global, receivedOscMessage.nextAsInt());
+  }
+
+
+  // Strip commands over OSC
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/direction", "ii") ) 
+  {
+    uint8_t strip_id = receivedOscMessage.nextAsInt();
+    strip.getSegment(strip_id).reverse = receivedOscMessage.nextAsInt();
+    // OR do setOption(SEG_OPTION_REVERSED)
+  }
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/intensity", "if") ) 
+  {
+    uint8_t strip_id = receivedOscMessage.nextAsInt();
+    strip.getSegment(strip_id).intensity = receivedOscMessage.nextAsFloat() * 255.0f;
+  }
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/freeze", "ii") ) 
+  {
+    debugI("Received OSC message for freeze\r\n");
+    uint8_t strip_id = receivedOscMessage.nextAsInt();
+    strip.getSegment(strip_id).freeze = receivedOscMessage.nextAsInt() == 1;
+  }
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/opacity", "if") ) 
+  {
+    uint8_t strip_id = receivedOscMessage.nextAsInt();
+    strip.getSegment(strip_id).opacity = receivedOscMessage.nextAsFloat() * 255.0f;
+    // FIXME: Could use setOpacity to apply this with fade transition
+  }
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/effect", "ii") ) 
+  {
+    uint8_t strip_id = receivedOscMessage.nextAsInt();
+    strip.getSegment(strip_id).setMode(receivedOscMessage.nextAsInt());
+  }
+
 }
-
-
-
 
 
 
