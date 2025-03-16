@@ -24,6 +24,15 @@ The LumaPXL node can send and receive OSC messages which are described below. Se
   - Sent on every loop iteration (rate set by usermod)
   - Sent on change of more than 0.01 if "only send on change" is set
 
+- TODO ```/[hostname]/encoder/count```
+  - Value is integer between 0 and something
+  - Sent on analog sample rate
+
+- TODO ```/[hostname]/encoder/velocity```
+  - Value is float between negative something and something
+  - Sent on analog sample rate
+
+
 ### Receive
 
 - ```/mod1/value``` with 1 float arg
@@ -58,6 +67,20 @@ The LumaPXL node can send and receive OSC messages which are described below. Se
   - Integer 1: Segment ID starting at 0
   - Integer 2: Effect ID (see f/w for IDs)
 
+- ```/strip/color1``` with 2 integer args (foreground)
+  - Integer 1: Segment ID starting at 0
+  - Integer 2: 32-bit value, bytes 0x00RRGGBB
 
+- ```/strip/color2``` with 2 integer args (background)
+  - Integer 1: Segment ID starting at 0
+  - Integer 2: 32-bit value, bytes 0x00RRGGBB
+
+- ```/strip/color3``` with 2 integer args (accent color?)
+  - Integer 1: Segment ID starting at 0
+  - Integer 2: 32-bit value, bytes 0x00RRGGBB
+
+- ```/strip/palette``` with 2 integer args
+  - Integer 1: Segment ID starting at 0
+  - Integer 2: 8-bit value, 0-XXX palette number
 
 
