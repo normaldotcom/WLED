@@ -413,11 +413,11 @@ public:
 
       // debugI("GPIO Expander State: %u\r\n", gpio_expander_connected);
 
-      debugI("Strips:\r\n");
-      for(uint8_t i=0; i<strip.getSegmentsNum(); i++)
-      {
-        debugI("  Strip %u: %u LEDs, frozen=%u\r\n", i, strip.getSegment(i).length(), strip.getSegment(i).freeze);
-      }
+      // debugI("Strips:\r\n");
+      // for(uint8_t i=0; i<strip.getSegmentsNum(); i++)
+      // {
+      //   debugI("  Strip %u: %u LEDs, frozen=%u\r\n", i, strip.getSegment(i).length(), strip.getSegment(i).freeze);
+      // }
 
 
       Debug.handle();
@@ -724,8 +724,10 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
   }
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/opacity", "if") ) 
   {
+    debugI("Got opacity reading\r\n");
     uint8_t strip_id = receivedOscMessage.nextAsInt();
-    strip.getSegment(strip_id).opacity = receivedOscMessage.nextAsFloat() * 255.0f;
+    //strip.getSegment(strip_id).opacity = receivedOscMessage.nextAsFloat() * 255.0f;
+    strip.getSegment(strip_id).setOpacity(receivedOscMessage.nextAsFloat() * 255.0f);
     // FIXME: Could use setOpacity to apply this with fade transition
   }
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/effect", "ii") ) 
@@ -755,6 +757,12 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
   {
     uint8_t strip_id = receivedOscMessage.nextAsInt();
     strip.getSegment(strip_id).setPalette(receivedOscMessage.nextAsInt()); // 8bit palette index
+  }
+
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/speed", "if") ) 
+  {
+    uint8_t strip_id = receivedOscMessage.nextAsInt();
+    strip.getSegment(strip_id).speed = receivedOscMessage.nextAsFloat() * 255.0f; // 8bit palette index
   }
 
 }

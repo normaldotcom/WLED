@@ -51,17 +51,17 @@ The LumaPXL node can send and receive OSC messages which are described below. Se
   - Integer 1: Segment ID starting at 0
   - Integer 2: Direction (0=normal 1=reverse)
 
-- ```/strip/intensity``` with 2 integer args
+- ```/strip/intensity``` with 1 float and 1 integer
   - Integer 1: Segment ID starting at 0
-  - Integer 2: Intensity (0-255)
+  - Integer 2: Float (0.0 - 1.0)
 
 - ```/strip/freeze``` with 2 integer args
   - Integer 1: Segment ID starting at 0
   - Integer 2: Freeze (0=artnet enabled, 1=internal effects)
 
-- ```/strip/opacity``` with 2 integer args
+- ```/strip/opacity``` with 1 integer and 1 float args
   - Integer 1: Segment ID starting at 0
-  - Integer 2: Opacity (0-255)
+  - Integer 2: Opacity (0.0-1.0)
 
 - ```/strip/effect``` with 2 integer args
   - Integer 1: Segment ID starting at 0
@@ -82,5 +82,9 @@ The LumaPXL node can send and receive OSC messages which are described below. Se
 - ```/strip/palette``` with 2 integer args
   - Integer 1: Segment ID starting at 0
   - Integer 2: 8-bit value, 0-XXX palette number
+
+- ```/strip/speed``` with 1 integer and 1 float args
+  - Integer 1: Segment ID starting at 0
+  - Integer 2: Float value, 0.0 - 1.0
 
 
