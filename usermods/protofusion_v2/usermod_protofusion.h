@@ -426,7 +426,7 @@ public:
       lastHeartbeat = now;
 
       snprintf(osc_path, 128, "/%s/heartbeat", cmDNS);
-      osc->sendInt(osc_path, 1);
+      osc->sendString(osc_path, GIT_FW_VERSION);
     }
 
  
@@ -755,13 +755,13 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
   }
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/freeze", "ii") ) 
   {
-    debugI("Received OSC message for freeze\r\n");
+    //debugI("Received OSC message for freeze\r\n");
     uint8_t strip_id = receivedOscMessage.nextAsInt();
     strip.getSegment(strip_id).freeze = receivedOscMessage.nextAsInt() == 1;
   }
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/opacity", "if") ) 
   {
-    debugI("Got opacity reading\r\n");
+    //debugI("Got opacity reading\r\n");
     uint8_t strip_id = receivedOscMessage.nextAsInt();
     //strip.getSegment(strip_id).opacity = receivedOscMessage.nextAsFloat() * 255.0f;
     strip.getSegment(strip_id).setOpacity(receivedOscMessage.nextAsFloat() * 255.0f);
@@ -770,13 +770,17 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/effect", "ii") ) 
   {
     uint8_t strip_id = receivedOscMessage.nextAsInt();
-    strip.getSegment(strip_id).setMode(receivedOscMessage.nextAsInt());
+    uint8_t effect_id = receivedOscMessage.nextAsInt();
+    strip.getSegment(strip_id).setMode(effect_id);
+    //debugI("Got strip %u effect of %u\r\n", strip_id, effect_id);
   }
 
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/color1", "ii") ) 
   {
     uint8_t strip_id = receivedOscMessage.nextAsInt();
-    strip.getSegment(strip_id).setColor(0, receivedOscMessage.nextAsInt()); // This hopefully will work--32bit RGB
+    uint32_t color = receivedOscMessage.nextAsInt();
+    strip.getSegment(strip_id).setColor(0, color); // This hopefully will work--32bit RGB
+    //debugI("Got strip %u color1 of %lu\r\n", strip_id, color);
   }
 
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/color2", "ii") ) 
