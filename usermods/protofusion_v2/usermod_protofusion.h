@@ -26,6 +26,7 @@
 #include "src/dependencies/e131/ESPAsyncE131.h"
 #include <RemoteDebug.h>
 #include <Adafruit_TCA8418.h>
+#include <Adafruit_seesaw.h>
 
 // the default frequency to read the analog distance sensor (ms)
 #ifndef USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL
@@ -88,7 +89,7 @@ static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip);
 RemoteDebug Debug;
 ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
 Adafruit_TCA8418 tio;
-
+Adafruit_seesaw ss;
 
 
 
@@ -100,7 +101,7 @@ private:
 
   unsigned long readingInterval = USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL;
   unsigned long lastMeasurement = UINT32_MAX - (USERMOD_PROTOFUSION_MEASUREMENT_INTERVAL - USERMOD_PROTOFUSION_FIRST_MEASUREMENT_AT);
-
+  unsigned long lastHeartbeat = 0;
 
   // flag set at startup
   bool enabled = true;
@@ -144,6 +145,7 @@ private:
   analog_mod_t analog_mod[NUM_ANALOG_MODS]; // use default values, thanks c++!
 
   bool gpio_expander_connected = false;
+  bool encoder_connected = false;
 
   // Default destination IP, changeable from web interface 
   uint8_t osc_dest_ip[4] = {192, 168, 1, 22};
@@ -210,7 +212,15 @@ public:
 
 
 
-
+    if (! ss.begin(0x36)) 
+    {
+      encoder_connected = false;
+    }
+    else
+    {
+      encoder_connected = true;
+    }
+    
     // Set up each analog mod
     for(uint8_t i=0; i<NUM_ANALOG_MODS; i++)
     {
@@ -296,9 +306,14 @@ public:
           display->println(ETH.localIP().toString());
 
           if(gpio_expander_connected)
-            display->println("  Xpand: Online");
+            display->println("  Xpand: OK ");
           else
-            display->println("  Xpand: Offline");
+            display->println("  Xpnd: Offline");
+
+          if(encoder_connected)
+            display->println("   Enc: OK ");
+          else
+            display->println("   Enc: Offline");
 
           display->display();      // Show initial text
 
@@ -403,8 +418,17 @@ public:
     
 
 
-
     unsigned long now = millis();
+
+
+    if(now - lastHeartbeat > 1000)
+    {
+      lastHeartbeat = now;
+
+      snprintf(osc_path, 128, "/%s/heartbeat", cmDNS);
+      osc->sendInt(osc_path, 1);
+    }
+
  
     if (now - lastMeasurement > readingInterval)
     {    
@@ -419,6 +443,12 @@ public:
       //   debugI("  Strip %u: %u LEDs, frozen=%u\r\n", i, strip.getSegment(i).length(), strip.getSegment(i).freeze);
       // }
 
+      // if(encoder_connected)
+      // {
+      //   debugI("Encoder position: %u\r\n", ss.getEncoderPosition());
+      // }
+
+      
 
       Debug.handle();
 
@@ -426,6 +456,13 @@ public:
 
 
 
+      if(encoder_connected)
+      {
+        int32_t pos = ss.getEncoderPosition();
+        debugI("Encoder position: %d\r\n", pos);
+        snprintf(osc_path, 128, "/%s/encoder", cmDNS);
+        osc->sendFloat(osc_path, pos);
+      }
 
 
       for(uint8_t i=0; i<NUM_ANALOG_MODS; i++)
