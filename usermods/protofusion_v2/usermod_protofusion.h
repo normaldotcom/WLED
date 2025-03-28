@@ -39,7 +39,7 @@
 #endif
 
 
-#define PROTOFUSION_ARTNET_PORT 6454
+#define PROTOFUSION_ARTNET_PORT 6455
 //from e131
 #define MAX_3_CH_LEDS_PER_UNIVERSE 170
 #define MAX_4_CH_LEDS_PER_UNIVERSE 128
@@ -296,10 +296,13 @@ public:
           osc_udp.begin(osc_rx_port);
           isConnected = 1;
 
+          ETH.setHostname(cmDNS);
+
           display->clearDisplay();
           display->setTextColor(SSD1306_WHITE);
           display->setCursor(0, 0);
-          display->println(F("LumaPXL: Ready     "));
+          display->print("ID: "); 
+          display->println(cmDNS);
           display->setTextSize(1); // Draw 2X-scale text
           //display->println("");
           display->print("  IP: ");
@@ -774,6 +777,33 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
     strip.getSegment(strip_id).setMode(effect_id);
     //debugI("Got strip %u effect of %u\r\n", strip_id, effect_id);
   }
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/effect_osi", "iifff") ) 
+  {
+    uint8_t strip_id = receivedOscMessage.nextAsInt();
+    uint8_t effect_id = receivedOscMessage.nextAsInt();
+    float opacity = receivedOscMessage.nextAsFloat();
+    float speed = receivedOscMessage.nextAsFloat();
+    float intensity = receivedOscMessage.nextAsFloat();
+
+    strip.getSegment(strip_id).setMode(effect_id);
+    strip.getSegment(strip_id).setOpacity(opacity * 255.0f);
+    strip.getSegment(strip_id).speed = speed * 255.0f;
+    strip.getSegment(strip_id).intensity = intensity * 255.0f;
+    //debugI("Got strip %u effect of %u\r\n", strip_id, effect_id);
+  }
+
+  // Single color static
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/effect_static", "iif") ) 
+  {
+    uint8_t strip_id = receivedOscMessage.nextAsInt();
+    uint32_t color = receivedOscMessage.nextAsInt();
+    float opacity = receivedOscMessage.nextAsFloat();
+
+    strip.getSegment(strip_id).setMode(0);
+    strip.getSegment(strip_id).setOpacity(opacity * 255.0f);
+    strip.getSegment(strip_id).setColor(0, color); // This hopefully will work--32bit RGB
+    //debugI("Got strip %u effect of %u\r\n", strip_id, effect_id);
+  }
 
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/color1", "ii") ) 
   {
@@ -806,6 +836,11 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
     strip.getSegment(strip_id).speed = receivedOscMessage.nextAsFloat() * 255.0f; // 8bit palette index
   }
 
+  else if ( receivedOscMessage.checkOscAddressAndTypeTags("/brightness", "f") ) 
+  {
+    float brightness = receivedOscMessage.nextAsFloat();
+    strip.setBrightness(255 * brightness);
+  }
 }
 
 

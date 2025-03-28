@@ -7,6 +7,12 @@ This usermod will
 - Use analog reading to control number of pixels per segment
 - Use analog reading to control brightnes / intensity of internal WLED effects (by segment)
 
+## Expansion Header Pin Notes
+
+- ```16``` - no analog
+- ```35``` - input only, LED (depopped)
+- ```34``` - input only (silk error, labeled 44 on board)
+
 ## API
 
 The LumaPXL node can send and receive OSC messages which are described below. Sent messages are transmitted to the IP address configured in the usermod.
