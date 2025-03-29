@@ -83,7 +83,7 @@ void sendArtnetPollReplyEMZ(ArtPollReply *reply, IPAddress ipAddress, uint16_t p
 static void wait_strip_idle(uint32_t ms_max);
 void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol);
 static void osc_parser( MicroOscMessage& receivedOscMessage);
-static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip);
+static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip, uint8_t precalc);
 
 
 // Private Variables
@@ -460,7 +460,7 @@ public:
         // Ugh. Expose stuff for the Artnet callback.
         analog_mod_global[i].segment_id = analog_mod[i].segment_id;
         analog_mod_global[i].osc_artnet_enable = analog_mod[i].osc_input;
-        analog_mod_global[i].analog_artnet_enable = analog_mod[i].analog_input != -1;
+        analog_mod_global[i].analog_artnet_enable = (analog_mod[i].analog_input != -1) && analog_mod[i].modulate_artnet > 0;
       }
 
       // Do high rate stuff that can happen after we update the strips
@@ -1016,7 +1016,7 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
           scalar_1 = analog_mod_global[0].avg_reading;
         }
         unsigned int stopled_onsegment_1 = (seg_len_1 * scalar_1) ; // segment relative
-        // debugI("Mod1: enabled=%u start=%u stop=%u len=%u scalar=%f stopled=%u\r\n", mod1_enable, seg_start_1, seg_stop_1, seg_len_1, scalar_1, stopled_1);
+        // debugI("Mod1: enabled=%u stopLED=%u len=%u scalar=%f\r\n", mod1_enable, stopled_onsegment_1, seg_len_1, scalar_1);
 
 
         // MOD2 ////////////////////////////////////////////////////////////
@@ -1046,13 +1046,13 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
 
         // Start at strip 0. 
         uint16_t current_strip = 0;
-        int current_led_on_strip = -1;
+        int32_t current_led_on_strip = -1;
 
         // TODO: call find_next_led for all previously set LEDs
-        // for(uint16_t i=0; i<previousLeds; i++)
-        // {
-        //   find_next_led(&current_strip, &current_led_on_strip);
-        // }
+        for(uint32_t i=0; i<previousLeds; i++)
+        {
+          find_next_led(&current_strip, &current_led_on_strip, 0);
+        }
       
       // bool firstled = find_next_led(&current_strip, &current_led_on_strip);
       // debugI("Got Artnet message, first led result=%u strip=%u led=%u\r\n", firstled, current_strip, current_led_on_strip);
@@ -1063,24 +1063,24 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
 
         // EMZ is 4chan RGBW?
         if (!is4Chan) {
-          for (unsigned i = previousLeds; i < ledsTotal; i++) 
+          for (uint32_t i = previousLeds; i < ledsTotal; i++) 
           {
-            uint8_t found = find_next_led(&current_strip, &current_led_on_strip);
+            uint8_t found = find_next_led(&current_strip, &current_led_on_strip, 1);
             //debugI("success=%u strip=%d led=%d\r\n", found, current_strip, current_led_on_strip);
             if(found)
             {
               // If strip ID matches mod1, and within limit, black out
-              // if(mod1_enable && current_strip == analog_mod_global[0].segment_id && current_led_on_strip >= stopled_onsegment_1)
-              // {
-              //   // blackout the pixel
-              //   strip.getSegment(current_strip).setPixelColor(current_led_on_strip, RGBW32(0,0,0,0));
-              // }
-              // else if(mod2_enable && current_strip == analog_mod_global[1].segment_id && current_led_on_strip >= stopled_onsegment_2)
-              // {
-              //   // blackout the pixel
-              //   strip.getSegment(current_strip).setPixelColor(current_led_on_strip, RGBW32(0,0,0,0));
-              // }
-              // else
+              if(mod1_enable && current_strip == analog_mod_global[0].segment_id && current_led_on_strip >= stopled_onsegment_1)
+              {
+                // blackout the pixel
+                strip.getSegment(current_strip).setPixelColor(current_led_on_strip, RGBW32(0,0,0,0));
+              }
+              else if(mod2_enable && current_strip == analog_mod_global[1].segment_id && current_led_on_strip >= stopled_onsegment_2)
+              {
+                // blackout the pixel
+                strip.getSegment(current_strip).setPixelColor(current_led_on_strip, RGBW32(0,0,0,0));
+              }
+              else
               {
                 uint32_t color = RGBW32(e131_data[dmxOffset], e131_data[dmxOffset+1], e131_data[dmxOffset+2],0);
                 strip.getSegment(current_strip).setPixelColor(current_led_on_strip, color);
@@ -1093,8 +1093,8 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
             
             dmxOffset+=3;
           }
-          strip.getSegment(2).beginDraw();
-          strip.show();
+          // strip.getSegment(2).beginDraw();
+          // strip.show();
         }
 
 
@@ -1149,11 +1149,11 @@ void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol){
 
 
 
-static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip)
+static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip, uint8_t precalc)
 {
     // debugI("find_next_led: strip=%u led=%d\r\n", *current_strip, *current_led_on_strip);
     // debugI(" -- strip %u/%u len=%u\r\n", *current_strip, strip.getSegmentsNum(), strip.getSegment(*current_strip).length());
-    if(*current_strip == 0 && *current_led_on_strip == -1)
+    if(*current_strip == 0 && *current_led_on_strip == -1 && precalc > 0)
     {
         strip.getSegment(*current_strip).beginDraw();
     }
@@ -1176,8 +1176,9 @@ static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip)
       // debugI("checking strip %U \r\n", *current_strip);
       if(strip.getSegment(*current_strip).freeze)
       {
-        strip.getSegment(*current_strip).beginDraw();
-        
+        if(precalc > 0)
+          strip.getSegment(*current_strip).beginDraw();
+
         // debugI("Strip OK\r\n");
         // OK, found a segment we can use; reset the pixel count
         *current_led_on_strip = 0;
