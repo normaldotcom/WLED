@@ -88,7 +88,7 @@ static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip);
 
 // Private Variables
 RemoteDebug Debug;
-// ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
+ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
 Adafruit_TCA8418 tio;
 Adafruit_seesaw ss;
 
@@ -325,11 +325,11 @@ public:
           display->display();      // Show initial text
 
           
-        // bool success = secondary_e131.begin(false, PROTOFUSION_ARTNET_PORT, 1, 5); //E131_MAX_UNIVERSE_COUNT);
-        // if(success)
-        //   DEBUG_PRINTLN(F("Protofusion: e131 init completed OK."));
-        // else
-        //   DEBUG_PRINTLN(F("Protofusion: e131 init failed."));
+        bool success = secondary_e131.begin(false, PROTOFUSION_ARTNET_PORT, 1, 5); //E131_MAX_UNIVERSE_COUNT);
+        if(success)
+          DEBUG_PRINTLN(F("Protofusion: e131 init completed OK."));
+        else
+          DEBUG_PRINTLN(F("Protofusion: e131 init failed."));
 
 
 
@@ -787,7 +787,7 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
     float speed = receivedOscMessage.nextAsFloat();
     float intensity = receivedOscMessage.nextAsFloat();
 
-    wait_strip_idle(100);
+    // wait_strip_idle(100);
     
     strip.getSegment(strip_id).opacity = opacity * 255.0f;
     strip.getSegment(strip_id).speed = speed * 255.0f;
@@ -803,7 +803,7 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
     uint32_t color = receivedOscMessage.nextAsInt();
     float opacity = receivedOscMessage.nextAsFloat();
 
-    wait_strip_idle(10);
+    // wait_strip_idle(10);
 
     strip.getSegment(strip_id).opacity = (opacity * 255.0f);
     strip.getSegment(strip_id).setColor(0, color); // This hopefully will work--32bit RGB
@@ -1153,6 +1153,10 @@ static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip)
 {
     // debugI("find_next_led: strip=%u led=%d\r\n", *current_strip, *current_led_on_strip);
     // debugI(" -- strip %u/%u len=%u\r\n", *current_strip, strip.getSegmentsNum(), strip.getSegment(*current_strip).length());
+    if(*current_strip == 0 && *current_led_on_strip == -1)
+    {
+        strip.getSegment(*current_strip).beginDraw();
+    }
 
     // Check if next LED on the current strip is available; if so return it
     if((strip.getSegment(*current_strip).freeze == true) && ((*current_led_on_strip+1) < strip.getSegment(*current_strip).length()))
@@ -1172,6 +1176,8 @@ static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip)
       // debugI("checking strip %U \r\n", *current_strip);
       if(strip.getSegment(*current_strip).freeze)
       {
+        strip.getSegment(*current_strip).beginDraw();
+        
         // debugI("Strip OK\r\n");
         // OK, found a segment we can use; reset the pixel count
         *current_led_on_strip = 0;
