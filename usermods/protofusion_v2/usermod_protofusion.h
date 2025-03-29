@@ -80,6 +80,7 @@ static int8_t digital_out0_pin_global = -1;
 // Private Prototypes
 void handleArtnetPollReplyEMZ(IPAddress ipAddress);
 void sendArtnetPollReplyEMZ(ArtPollReply *reply, IPAddress ipAddress, uint16_t portAddress);
+static void wait_strip_idle(uint32_t ms_max);
 void handleE131PacketEMZ(e131_packet_t* p, IPAddress clientIP, byte protocol);
 static void osc_parser( MicroOscMessage& receivedOscMessage);
 static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip);
@@ -87,7 +88,7 @@ static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip);
 
 // Private Variables
 RemoteDebug Debug;
-ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
+// ESPAsyncE131 secondary_e131(handleE131PacketEMZ);
 Adafruit_TCA8418 tio;
 Adafruit_seesaw ss;
 
@@ -153,10 +154,13 @@ private:
   // Default pin for dist sensor. -1 is disabled.
   int8_t digital0_pin = -1;
   int8_t digital0_pin_val = -1;
+  uint32_t digital0_tx_timestamp = 0;
   int8_t digital1_pin = -1;
   int8_t digital1_pin_val = -1;
+  uint32_t digital1_tx_timestamp = 0;
   int8_t digital2_pin = -1;
   int8_t digital2_pin_val = -1;
+  uint32_t digital2_tx_timestamp = 0;
   int8_t digital_out0_pin = -1;
 
   // Ports for OSC
@@ -321,11 +325,11 @@ public:
           display->display();      // Show initial text
 
           
-        bool success = secondary_e131.begin(false, PROTOFUSION_ARTNET_PORT, 1, 5); //E131_MAX_UNIVERSE_COUNT);
-        if(success)
-          DEBUG_PRINTLN(F("Protofusion: e131 init completed OK."));
-        else
-          DEBUG_PRINTLN(F("Protofusion: e131 init failed."));
+        // bool success = secondary_e131.begin(false, PROTOFUSION_ARTNET_PORT, 1, 5); //E131_MAX_UNIVERSE_COUNT);
+        // if(success)
+        //   DEBUG_PRINTLN(F("Protofusion: e131 init completed OK."));
+        // else
+        //   DEBUG_PRINTLN(F("Protofusion: e131 init failed."));
 
 
 
@@ -335,90 +339,8 @@ public:
       }
     }
 
-
-
-
-
-    //  Handle ISR
-    if (gpio_expander_connected == true && digitalRead(13) == 0)
-    {
-      //  CHECK WHICH INTERRUPTS TO HANDLE
-      int intStat = tio.readRegister(TCA8418_REG_INT_STAT);
-      if (intStat & 0x02)
-      {
-        //  reading the registers is mandatory to clear IRQ flag
-        //  can also be used to find the GPIO changed
-        //  as these registers are a bitmap of the gpio pins.
-        tio.readRegister(TCA8418_REG_GPIO_INT_STAT_1);
-        tio.readRegister(TCA8418_REG_GPIO_INT_STAT_2);
-        tio.readRegister(TCA8418_REG_GPIO_INT_STAT_3);
-        //  clear GPIO IRQ flag
-        tio.writeRegister(TCA8418_REG_INT_STAT, 2);
-      }
-
-      if (intStat & 0x01)
-      {
-        //  datasheet page 16 - Table 2
-        int keyCode = tio.getEvent();
-        uint8_t gpio = (keyCode & 0x7F) - 97;
-        if(keyCode & 0x80)
-        {
-          //  map keyCode to GPIO nr.
-          debugI("Xpand: Press on pin %u\r\n", gpio);
-          snprintf(osc_path, 128, "/%s/digital%u", cmDNS, gpio+10); // Offset of 10 from onboard GPIO
-          osc->sendInt(osc_path, 1);
-        }
-        else
-        {
-          //  map keyCode to GPIO nr.
-          debugI("Xpand: Release on pin %u\r\n", gpio);
-          snprintf(osc_path, 128, "/%s/digital%u", cmDNS, gpio+10); // Offset of 10 from onboard GPIO
-          osc->sendInt(osc_path, 0);
-        }
-
-        //  clear the EVENT IRQ flag
-        tio.writeRegister(TCA8418_REG_INT_STAT, 1);
-      }
-
-      //  check pending events
-      // int intstat = tio.readRegister(TCA8418_REG_INT_STAT);
-      // if ((intstat & 0x03) == 0) TCA8418_event = false;
-
-    }
-
-    // TODO: only send if change and send_on_change
-    if(digital0_pin != -1)
-    {
-      uint8_t val = digitalRead(digital0_pin);
-      if(digital0_pin_val != val)
-      {
-        snprintf(osc_path, 128, "/%s/digital0", cmDNS);
-        osc->sendInt(osc_path, val);
-      }
-      digital0_pin_val = val;
-    }
-    if(digital1_pin != -1)
-    {
-      uint8_t val = digitalRead(digital1_pin);
-      if(digital1_pin_val != val)
-      {
-        snprintf(osc_path, 128, "/%s/digital1", cmDNS);
-        osc->sendInt(osc_path, val);
-      }
-      digital1_pin_val = val;
-    }
-    if(digital2_pin != -1)
-    {
-      uint8_t val = digitalRead(digital2_pin);
-      if(digital2_pin_val != val)
-      {
-        snprintf(osc_path, 128, "/%s/digital2", cmDNS);
-        osc->sendInt(osc_path, val);
-      }
-      digital2_pin_val = val;
-    }
-    
-    
+    // Do this early on so the strip is definately not being updated when these functions are called
+    osc->onOscMessageReceived( osc_parser );
 
 
     unsigned long now = millis();
@@ -432,7 +354,8 @@ public:
       osc->sendString(osc_path, GIT_FW_VERSION);
     }
 
- 
+  //  return; // do nothing
+
     if (now - lastMeasurement > readingInterval)
     {    
       lastMeasurement = now;
@@ -451,13 +374,7 @@ public:
       //   debugI("Encoder position: %u\r\n", ss.getEncoderPosition());
       // }
 
-      
-
       Debug.handle();
-
-      osc->onOscMessageReceived( osc_parser );
-
-
 
       if(encoder_connected)
       {
@@ -473,7 +390,6 @@ public:
         if(analog_mod[i].osc_input == true)
         { 
           // TODO: Need to figure out how to update artnet stuff
-
 
           // Read in OSC message and set things
           if(analog_mod[i].set_brightness)
@@ -523,7 +439,8 @@ public:
           {
             // EMZ figure out how to do this per-segment...
             // strip.setBrightness(analog_mod_global[i].lastReading*255, false); // update brightness;  immediately redraw
-            strip.getSegment(analog_mod[i].segment_id).setOpacity(analog_mod_global[i].lastReading*255.0f);
+            //strip.getSegment(analog_mod[i].segment_id).setOpacity(analog_mod_global[i].lastReading*255.0f);
+            strip.getSegment(analog_mod[i].segment_id).opacity = analog_mod_global[i].lastReading*255.0f;
           }
           if(analog_mod[i].set_intensity)
           {
@@ -545,6 +462,91 @@ public:
         analog_mod_global[i].osc_artnet_enable = analog_mod[i].osc_input;
         analog_mod_global[i].analog_artnet_enable = analog_mod[i].analog_input != -1;
       }
+
+      // Do high rate stuff that can happen after we update the strips
+
+      //  Handle ISR
+      if (gpio_expander_connected == true && digitalRead(13) == 0)
+      {
+        //  CHECK WHICH INTERRUPTS TO HANDLE
+        int intStat = tio.readRegister(TCA8418_REG_INT_STAT);
+        if (intStat & 0x02)
+        {
+          //  reading the registers is mandatory to clear IRQ flag
+          //  can also be used to find the GPIO changed
+          //  as these registers are a bitmap of the gpio pins.
+          tio.readRegister(TCA8418_REG_GPIO_INT_STAT_1);
+          tio.readRegister(TCA8418_REG_GPIO_INT_STAT_2);
+          tio.readRegister(TCA8418_REG_GPIO_INT_STAT_3);
+          //  clear GPIO IRQ flag
+          tio.writeRegister(TCA8418_REG_INT_STAT, 2);
+        }
+
+        if (intStat & 0x01)
+        {
+          //  datasheet page 16 - Table 2
+          int keyCode = tio.getEvent();
+          uint8_t gpio = (keyCode & 0x7F) - 97;
+          if(keyCode & 0x80)
+          {
+            //  map keyCode to GPIO nr.
+            debugI("Xpand: Press on pin %u\r\n", gpio);
+            snprintf(osc_path, 128, "/%s/digital%u", cmDNS, gpio+10); // Offset of 10 from onboard GPIO
+            osc->sendInt(osc_path, 1);
+          }
+          else
+          {
+            //  map keyCode to GPIO nr.
+            debugI("Xpand: Release on pin %u\r\n", gpio);
+            snprintf(osc_path, 128, "/%s/digital%u", cmDNS, gpio+10); // Offset of 10 from onboard GPIO
+            osc->sendInt(osc_path, 0);
+          }
+
+          //  clear the EVENT IRQ flag
+          tio.writeRegister(TCA8418_REG_INT_STAT, 1);
+        }
+
+        //  check pending events
+        // int intstat = tio.readRegister(TCA8418_REG_INT_STAT);
+        // if ((intstat & 0x03) == 0) TCA8418_event = false;
+
+      }
+
+      // TODO: only send if change and send_on_change
+      if(digital0_pin != -1)
+      {
+        uint8_t val = digitalRead(digital0_pin);
+        if(digital0_pin_val != val && millis() - digital0_tx_timestamp > 100)
+        {
+          digital0_tx_timestamp = millis();
+          snprintf(osc_path, 128, "/%s/digital0", cmDNS);
+          osc->sendInt(osc_path, val);
+        }
+        digital0_pin_val = val;
+      }
+      if(digital1_pin != -1)
+      {
+        uint8_t val = digitalRead(digital1_pin);
+        if(digital1_pin_val != val && millis() - digital1_tx_timestamp > 100)
+        {
+          digital1_tx_timestamp = millis();
+          snprintf(osc_path, 128, "/%s/digital1", cmDNS);
+          osc->sendInt(osc_path, val);
+        }
+        digital1_pin_val = val;
+      }
+      if(digital2_pin != -1)
+      {
+        uint8_t val = digitalRead(digital2_pin);
+        if(digital2_pin_val != val && millis() - digital2_tx_timestamp > 100)
+        {
+          digital2_tx_timestamp = millis();
+          snprintf(osc_path, 128, "/%s/digital2", cmDNS);
+          osc->sendInt(osc_path, val);
+        }
+        digital2_pin_val = val;
+      }
+      
 
 
       
@@ -766,8 +768,8 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
   {
     //debugI("Got opacity reading\r\n");
     uint8_t strip_id = receivedOscMessage.nextAsInt();
-    //strip.getSegment(strip_id).opacity = receivedOscMessage.nextAsFloat() * 255.0f;
-    strip.getSegment(strip_id).setOpacity(receivedOscMessage.nextAsFloat() * 255.0f);
+    strip.getSegment(strip_id).opacity = receivedOscMessage.nextAsFloat() * 255.0f;
+    // strip.getSegment(strip_id).setOpacity(receivedOscMessage.nextAsFloat() * 255.0f);
     // FIXME: Could use setOpacity to apply this with fade transition
   }
   else if ( receivedOscMessage.checkOscAddressAndTypeTags("/strip/effect", "ii") ) 
@@ -785,10 +787,12 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
     float speed = receivedOscMessage.nextAsFloat();
     float intensity = receivedOscMessage.nextAsFloat();
 
-    strip.getSegment(strip_id).setMode(effect_id);
-    strip.getSegment(strip_id).setOpacity(opacity * 255.0f);
+    wait_strip_idle(100);
+    
+    strip.getSegment(strip_id).opacity = opacity * 255.0f;
     strip.getSegment(strip_id).speed = speed * 255.0f;
     strip.getSegment(strip_id).intensity = intensity * 255.0f;
+    strip.getSegment(strip_id).setMode(effect_id);
     //debugI("Got strip %u effect of %u\r\n", strip_id, effect_id);
   }
 
@@ -799,9 +803,11 @@ static void osc_parser( MicroOscMessage& receivedOscMessage)
     uint32_t color = receivedOscMessage.nextAsInt();
     float opacity = receivedOscMessage.nextAsFloat();
 
-    strip.getSegment(strip_id).setMode(0);
-    strip.getSegment(strip_id).setOpacity(opacity * 255.0f);
+    wait_strip_idle(10);
+
+    strip.getSegment(strip_id).opacity = (opacity * 255.0f);
     strip.getSegment(strip_id).setColor(0, color); // This hopefully will work--32bit RGB
+    strip.getSegment(strip_id).setMode(0);
     //debugI("Got strip %u effect of %u\r\n", strip_id, effect_id);
   }
 
@@ -1179,7 +1185,14 @@ static bool find_next_led(uint16_t* current_strip, int* current_led_on_strip)
 }
 
 
-
+// Waits until strip isn't updating
+static void wait_strip_idle(uint32_t ms_max)
+{
+  unsigned long wait_started = millis();
+  while(strip.isUpdating() && (millis() - wait_started < ms_max)) {
+    delay(1);
+  }
+}
 
 void handleArtnetPollReplyEMZ(IPAddress ipAddress) {
   ArtPollReply artnetPollReply;
