@@ -147,7 +147,11 @@ private:
 
   bool gpio_expander_connected = false;
   bool encoder_connected = false;
-
+  int32_t last_sent_encoder_position = 0;
+  float encoder_velocity = 0;
+  uint32_t last_encoder_time = 0;
+  int32_t last_encoder_position = 0;
+  float last_sent_velocity = 0.0f;
   // Default destination IP, changeable from web interface 
   uint8_t osc_dest_ip[4] = {192, 168, 1, 22};
 
@@ -379,9 +383,36 @@ public:
       if(encoder_connected)
       {
         int32_t pos = ss.getEncoderPosition();
-        debugI("Encoder position: %d\r\n", pos);
-        snprintf(osc_path, 128, "/%s/encoder", cmDNS);
-        osc->sendFloat(osc_path, pos);
+
+        int32_t delta = pos - last_encoder_position;
+        int32_t tdelta = millis() - last_encoder_time;
+
+        float velocity = 0.0f;
+        if(abs(tdelta) > 0)
+        {
+          velocity = (float)delta / (float)tdelta;
+        }
+
+        if(fabsf(last_sent_velocity - velocity) > 0.01f ||
+          (fabsf(velocity) < 0.000001f && last_sent_velocity > 0.000001f)
+        )
+        {
+          snprintf(osc_path, 128, "/%s/encoder/velocity", cmDNS);
+          osc->sendFloat(osc_path, velocity);
+          last_sent_velocity = velocity;
+        }
+
+        last_encoder_position = pos;
+        last_encoder_time = millis();
+
+
+        debugI("Encoder position: %d velocity: %f delta:%d pdelta: %d\r\n", pos, velocity, tdelta, delta);
+        if(abs(last_sent_encoder_position - pos) > 10)
+        {
+          last_sent_encoder_position = pos;
+          snprintf(osc_path, 128, "/%s/encoder/position", cmDNS);
+          osc->sendFloat(osc_path, pos);
+        }
       }
 
 
